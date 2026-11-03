@@ -1,0 +1,15 @@
+services:
+  pulsecheck:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    image: pulsecheck:1.0.0
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      APP_VERSION: "1.0.0"
+
+    restart: unless-stopped
