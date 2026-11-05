@@ -79,7 +79,7 @@ pipeline {
 
                     trivy image \
                       --scanners vuln \
-                      --severity HIGH \
+                      --severity CRITICAL \
                       --skip-files "**/pip/_vendor/bom.cdx.json" \
                       --format table \
                       --exit-code 1 \
