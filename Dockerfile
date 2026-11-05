@@ -8,28 +8,33 @@ ENV PYTHONUNBUFFERED=1
 # 3. Application working directory
 WORKDIR /app
 
-# 4. Create a non-root application user
+# 4 Update installed Debian packages
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# 5. Create a non-root application user
 RUN groupadd --system app && \
     useradd --system --gid app --create-home app
 
-# 5. Copy dependency file
+# 6. Copy dependency file
 COPY requirements.txt .
 
-# 6. Install dependencies
+# 7. Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 7. Copy application code
+# 8. Copy application code
 COPY --chown=app:app app/ ./app/
 
-# 8. Run as non-root user
+# 9. Run as non-root user
 USER app
 
-# 9. Application port
+# 10. Application port
 EXPOSE 8000
 
-# 10. Container health check
+# 11. Container health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
 
-# 11. Start application
+# 12. Start application
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
