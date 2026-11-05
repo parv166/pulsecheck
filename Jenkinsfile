@@ -184,7 +184,7 @@ pipeline {
                         set -euo pipefail
                         set +x
 
-                        EC2_HOST="43.204.220.219"
+                        EC2_HOST="16.4.95.134"
 
                         echo "Deploying build ${BUILD_NUMBER} to EC2..."
 
