@@ -167,11 +167,164 @@ pipeline {
                 }
             }
         }
+        stage('Deploy to EC2') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'pulsecheck-ec2-ssh',
+                        keyFileVariable: 'EC2_SSH_KEY',
+                        usernameVariable: 'EC2_SSH_USER'
+                    ),
+                    file(
+                        credentialsId: 'pulsecheck-ec2-known-hosts',
+                        variable: 'EC2_KNOWN_HOSTS'
+                    )
+                ]) {
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        set +x
+
+                        EC2_HOST="43.204.220.219"
+
+                        echo "Deploying build ${BUILD_NUMBER} to EC2..."
+
+                        ssh \
+                          -i "$EC2_SSH_KEY" \
+                          -o BatchMode=yes \
+                          -o IdentitiesOnly=yes \
+                          -o StrictHostKeyChecking=yes \
+                          -o UserKnownHostsFile="$EC2_KNOWN_HOSTS" \
+                          -o ConnectTimeout=15 \
+                          "$EC2_SSH_USER@$EC2_HOST" \
+                          "bash -s -- '${BUILD_NUMBER}'" <<'REMOTE_SCRIPT'
+
+set -euo pipefail
+
+BUILD_TAG="$1"
+AWS_REGION="ap-south-1"
+
+ACCOUNT_ID=$(aws sts get-caller-identity \
+  --region "$AWS_REGION" \
+  --query Account \
+  --output text)
+
+REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+IMAGE="${REGISTRY}/pulsecheck:${BUILD_TAG}"
+
+echo "Authenticating with ECR using EC2 IAM role..."
+
+DOCKER_CONFIG_DIR=$(sudo mktemp -d /tmp/pulsecheck-ecr.XXXXXX)
+
+cleanup() {
+    sudo rm -rf "$DOCKER_CONFIG_DIR"
+}
+
+trap cleanup EXIT
+
+aws ecr get-login-password --region "$AWS_REGION" \
+  | sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
+      docker login \
+      --username AWS \
+      --password-stdin "$REGISTRY"
+
+echo "Pulling image: $IMAGE"
+
+sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
+  docker pull "$IMAGE"
+
+cleanup
+trap - EXIT
+
+OLD_IMAGE=""
+
+if sudo docker inspect pulsecheck-app >/dev/null 2>&1; then
+    OLD_IMAGE=$(sudo docker inspect \
+      --format '{{.Config.Image}}' pulsecheck-app)
+fi
+
+restore_previous() {
+    if [ -z "$OLD_IMAGE" ]; then
+        echo "No previous image available for rollback."
+        return 1
+    fi
+
+    OLD_VERSION="${OLD_IMAGE##*:}"
+
+    echo "Restoring previous image: $OLD_IMAGE"
+
+    sudo docker run -d \
+      --name pulsecheck-app \
+      --restart unless-stopped \
+      -p 127.0.0.1:8000:8000 \
+      -e APP_VERSION="$OLD_VERSION" \
+      "$OLD_IMAGE"
+
+    for attempt in $(seq 1 20); do
+        if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+            echo "Previous version restored successfully."
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "Rollback health check failed."
+    sudo docker logs pulsecheck-app || true
+    return 1
+}
+
+echo "Removing previous container..."
+
+sudo docker rm -f pulsecheck-app >/dev/null 2>&1 || true
+
+echo "Starting new PulseCheck container..."
+
+if ! sudo docker run -d \
+    --name pulsecheck-app \
+    --restart unless-stopped \
+    -p 127.0.0.1:8000:8000 \
+    -e APP_VERSION="$BUILD_TAG" \
+    "$IMAGE"; then
+
+    echo "New container failed to start."
+    restore_previous
+    exit 1
+fi
+
+HEALTH_OK=0
+
+for attempt in $(seq 1 20); do
+    if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+        HEALTH_OK=1
+        break
+    fi
+    sleep 2
+done
+
+if [ "$HEALTH_OK" -ne 1 ]; then
+    echo "New deployment failed its health check."
+
+    sudo docker logs pulsecheck-app || true
+
+    sudo docker rm -f pulsecheck-app >/dev/null 2>&1 || true
+
+    restore_previous
+
+    exit 1
+fi
+
+echo "Deployment successful!"
+echo "Deployed version: $BUILD_TAG"
+
+REMOTE_SCRIPT
+'''
+                }
+            }
+        }
     }
 
     post {
         success {
-            echo 'PulseCheck CI pipeline and ECR image publishing completed successfully!'
+            echo 'PulseCheck CI, ECR publishing and EC2 deployment completed successfully!'
         }
 
         failure {
