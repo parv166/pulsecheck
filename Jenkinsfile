@@ -45,7 +45,7 @@ pipeline {
 
                     image="pulsecheck:${BUILD_NUMBER}"
 
-                    echo "===== Trivy Vulnerability Scan ====="
+                    echo "===== Trivy Vulnerability Report ====="
 
                     trivy image \
                       --scanners vuln \
@@ -69,6 +69,22 @@ pipeline {
 
                 archiveArtifacts artifacts: 'trivy-image-report.json',
                                  fingerprint: true
+
+                sh '''
+                    set -eu
+
+                    image="pulsecheck:${BUILD_NUMBER}"
+
+                    echo "===== Critical Vulnerability Quality Gate ====="
+
+                    trivy image \
+                      --scanners vuln \
+                      --severity CRITICAL \
+                      --skip-files "**/pip/_vendor/bom.cdx.json" \
+                      --format table \
+                      --exit-code 1 \
+                      "$image"
+                '''
             }
         }
 
