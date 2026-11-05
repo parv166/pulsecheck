@@ -1,13 +1,11 @@
-
 pipeline {
     agent any
 
     options {
-         
-          timestamps()
-          disableConcurrentBuilds()
-          skipDefaultCheckout(true)
-     }
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+    }
 
     stages {
 
@@ -37,6 +35,40 @@ pipeline {
                     docker build \
                       -t pulsecheck:${BUILD_NUMBER} .
                 '''
+            }
+        }
+
+        stage('Trivy Vulnerability Scan') {
+            steps {
+                sh '''
+                    set -eu
+
+                    image="pulsecheck:${BUILD_NUMBER}"
+
+                    echo "===== Trivy Vulnerability Scan ====="
+
+                    trivy image \
+                      --scanners vuln \
+                      --severity HIGH,CRITICAL \
+                      --skip-files "**/pip/_vendor/bom.cdx.json" \
+                      --format table \
+                      --exit-code 0 \
+                      "$image"
+
+                    echo "===== Saving JSON Security Report ====="
+
+                    trivy image \
+                      --scanners vuln \
+                      --severity HIGH,CRITICAL \
+                      --skip-files "**/pip/_vendor/bom.cdx.json" \
+                      --format json \
+                      --output trivy-image-report.json \
+                      --exit-code 0 \
+                      "$image"
+                '''
+
+                archiveArtifacts artifacts: 'trivy-image-report.json',
+                                 fingerprint: true
             }
         }
 
