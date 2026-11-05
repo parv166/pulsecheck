@@ -109,8 +109,7 @@ pipeline {
                       "pulsecheck:${BUILD_NUMBER}"
 
                     for attempt in $(seq 1 30); do
-                        if curl -fsS \
-                          "http://127.0.0.1:${host_port}/health"; then
+                        if curl -fsS "http://127.0.0.1:${host_port}/health"; then
                             echo
                             echo "Container smoke test successful"
                             exit 0
@@ -120,16 +119,59 @@ pipeline {
                     done
 
                     docker logs "$container"
+
                     echo "Container health test failed"
                     exit 1
                 '''
+            }
+        }
+
+        stage('Push Image to Amazon ECR') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-ecr-push',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        set +x
+
+                        export AWS_DEFAULT_REGION=ap-south-1
+
+                        account_id=$(/usr/local/bin/aws sts get-caller-identity \
+                          --query Account \
+                          --output text)
+
+                        registry="${account_id}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+                        image="pulsecheck:${BUILD_NUMBER}"
+                        ecr_image="${registry}/pulsecheck:${BUILD_NUMBER}"
+
+                        echo "Authenticating with Amazon ECR..."
+
+                        /usr/local/bin/aws ecr get-login-password \
+                          --region "$AWS_DEFAULT_REGION" \
+                        | docker login \
+                          --username AWS \
+                          --password-stdin "$registry"
+
+                        echo "Pushing image: $ecr_image"
+
+                        docker tag "$image" "$ecr_image"
+
+                        docker push "$ecr_image"
+
+                        echo "Image successfully pushed to ECR."
+                    '''
+                }
             }
         }
     }
 
     post {
         success {
-            echo 'PulseCheck CI pipeline completed successfully!'
+            echo 'PulseCheck CI pipeline and ECR image publishing completed successfully!'
         }
 
         failure {
