@@ -333,6 +333,7 @@ echo "Deployment successful!"
 echo "Deployed version: $BUILD_TAG"
 
 REMOTE_SCRIPT
+                    '''
                 }
             }
         }
