@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -140,6 +141,17 @@ pipeline {
 
                         export AWS_DEFAULT_REGION=ap-south-1
 
+                        echo "Creating temporary Docker configuration..."
+
+                        DOCKER_CONFIG_DIR=$(mktemp -d /tmp/pulsecheck-ecr-push.XXXXXX)
+                        export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
+
+                        cleanup() {
+                            rm -rf "$DOCKER_CONFIG_DIR"
+                        }
+
+                        trap cleanup EXIT
+
                         account_id=$(/usr/local/bin/aws sts get-caller-identity \
                           --query Account \
                           --output text)
@@ -164,10 +176,12 @@ pipeline {
                         docker push "$ecr_image"
 
                         echo "Image successfully pushed to ECR."
+                        echo "Temporary Docker credentials will now be removed."
                     '''
                 }
             }
         }
+
         stage('Deploy to EC2') {
             steps {
                 withCredentials([
@@ -319,7 +333,6 @@ echo "Deployment successful!"
 echo "Deployed version: $BUILD_TAG"
 
 REMOTE_SCRIPT
-'''
                 }
             }
         }
