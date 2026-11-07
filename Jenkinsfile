@@ -32,7 +32,7 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    docker build \
+                    docker build --pull --no-cache \
                       -t pulsecheck:${BUILD_NUMBER} .
                 '''
             }
@@ -104,6 +104,7 @@ pipeline {
 
                     docker run -d \
                       --name "$container" \
+                      --security-opt=no-new-privileges:true \
                       -p "127.0.0.1:${host_port}:8000" \
                       -e APP_VERSION="ci-${BUILD_NUMBER}" \
                       "pulsecheck:${BUILD_NUMBER}"
@@ -255,6 +256,7 @@ restore_previous() {
     sudo docker run -d \
       --name pulsecheck-app \
       --restart unless-stopped \
+      --security-opt=no-new-privileges:true \
       -p 127.0.0.1:8000:8000 \
       -e APP_VERSION="$OLD_VERSION" \
       "$OLD_IMAGE"
@@ -281,6 +283,7 @@ echo "Starting new PulseCheck container..."
 if ! sudo docker run -d \
     --name pulsecheck-app \
     --restart unless-stopped \
+    --security-opt=no-new-privileges:true \
     -p 127.0.0.1:8000:8000 \
     -e APP_VERSION="$BUILD_TAG" \
     "$IMAGE"; then
