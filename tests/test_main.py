@@ -32,3 +32,21 @@ def test_demo():
     assert response.status_code == 200
     assert response.json()["result"] == "success"
 
+
+
+def test_metrics():
+    # Generate a request so the metrics have data.
+    client.get("/health")
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "text/plain" in response.headers["content-type"]
+
+    metrics = response.text
+
+    assert "pulsecheck_http_requests_total" in metrics
+    assert 'method="GET"' in metrics
+    assert 'path="/health"' in metrics
+    assert 'status_code="200"' in metrics
+    assert "pulsecheck_http_request_duration_seconds_bucket" in metrics

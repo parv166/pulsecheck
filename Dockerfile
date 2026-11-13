@@ -22,7 +22,9 @@ RUN groupadd --system app && \
 COPY requirements.txt .
 
 # 7. Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Upgrade pip to update its bundled vulnerable libraries
+RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
 # 8. Copy application code
 COPY --chown=app:app app/ ./app/
