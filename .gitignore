@@ -3,3 +3,9 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .env
+
+# PulseCheck SQLite database
+data/
+*.db
+*.db-shm
+*.db-wal
