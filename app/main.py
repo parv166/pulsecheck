@@ -1,15 +1,13 @@
-import os
 import asyncio
-
-from app.scheduler import run_monitoring_scheduler
+import os
+import sqlite3
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from time import perf_counter
-from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
-
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -17,7 +15,9 @@ from prometheus_client import (
     generate_latest,
 )
 
+from app.database import Database
 from app.monitoring import MonitoringService
+from app.scheduler import run_monitoring_scheduler
 
 
 APP_NAME = "PulseCheck"
@@ -52,37 +52,60 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     interval = float(
         os.getenv("PULSECHECK_CHECK_INTERVAL_SECONDS", "10")
     )
+    db_path = os.getenv(
+        "PULSECHECK_DB_PATH",
+        "data/pulsecheck.db",
+    )
 
     if interval <= 0:
         raise ValueError(
             "PULSECHECK_CHECK_INTERVAL_SECONDS must be positive."
         )
 
+    database = await asyncio.to_thread(Database, db_path)
     service = MonitoringService()
-    app.state.monitoring_service = service
-
-    scheduler_task = asyncio.create_task(
-        run_monitoring_scheduler(
-            service,
-            interval_seconds=interval,
-        ),
-        name="pulsecheck-monitoring-scheduler",
-    )
-
-    app.state.monitoring_scheduler_task = scheduler_task
+    scheduler_task = None
 
     try:
+        # Restore registered applications and their latest results.
+        stored_targets = await asyncio.to_thread(
+            database.list_targets
+        )
+
+        for target in stored_targets:
+            latest_result = await asyncio.to_thread(
+                database.get_latest_result,
+                target.id,
+            )
+
+            service.restore_target(target, latest_result)
+
+        app.state.database = database
+        app.state.monitoring_service = service
+
+        scheduler_task = asyncio.create_task(
+            run_monitoring_scheduler(
+                service,
+                interval_seconds=interval,
+                database=database,
+            ),
+            name="pulsecheck-monitoring-scheduler",
+        )
+
+        app.state.monitoring_scheduler_task = scheduler_task
+
         yield
 
     finally:
-        scheduler_task.cancel()
+        if scheduler_task is not None:
+            scheduler_task.cancel()
 
-        try:
-            await scheduler_task
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await service.close()
+            try:
+                await scheduler_task
+            except asyncio.CancelledError:
+                pass
+
+        await service.close()
 
 
 app = FastAPI(
@@ -163,16 +186,32 @@ async def create_target(
     request: Request,
 ):
     service = request.app.state.monitoring_service
+    database = request.app.state.database
 
     try:
         target = service.register_target(
             name=payload.name,
             url=payload.url,
         )
+
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
             detail=str(exc),
+        ) from exc
+
+    try:
+        await asyncio.to_thread(
+            database.save_target,
+            target,
+        )
+
+    except sqlite3.Error as exc:
+        service.remove_target(target.id)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save monitoring target.",
         ) from exc
 
     return target
@@ -190,6 +229,37 @@ async def list_targets(request: Request):
             }
             for target in service.list_targets()
         ]
+    }
+
+
+@app.get("/api/targets/{target_id}/history")
+async def get_target_history(
+    target_id: str,
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    database = request.app.state.database
+
+    target = await asyncio.to_thread(
+        database.get_target,
+        target_id,
+    )
+
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Monitoring target not found.",
+        )
+
+    history = await asyncio.to_thread(
+        database.list_history,
+        target_id,
+        limit,
+    )
+
+    return {
+        "target_id": target_id,
+        "history": history,
     }
 
 
@@ -227,13 +297,27 @@ async def check_target(
     request: Request,
 ):
     service = request.app.state.monitoring_service
+    database = request.app.state.database
 
     try:
         result = await service.check_target(target_id)
+
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
             detail="Monitoring target not found.",
+        ) from exc
+
+    try:
+        await asyncio.to_thread(
+            database.save_result,
+            result,
+        )
+
+    except sqlite3.Error as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save monitoring result.",
         ) from exc
 
     return result
@@ -245,14 +329,30 @@ async def delete_target(
     request: Request,
 ):
     service = request.app.state.monitoring_service
+    database = request.app.state.database
 
-    deleted = service.remove_target(target_id)
-
-    if not deleted:
+    if not any(
+        target.id == target_id
+        for target in service.list_targets()
+    ):
         raise HTTPException(
             status_code=404,
             detail="Monitoring target not found.",
         )
+
+    try:
+        await asyncio.to_thread(
+            database.delete_target,
+            target_id,
+        )
+
+    except sqlite3.Error as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete monitoring target.",
+        ) from exc
+
+    service.remove_target(target_id)
 
     return {
         "deleted": True,

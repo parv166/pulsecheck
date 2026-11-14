@@ -8,7 +8,12 @@ from app.monitoring import CheckResult, MonitoringService
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "PULSECHECK_DB_PATH",
+        str(tmp_path / "pulsecheck-test.db"),
+    )
+
     with TestClient(app) as test_client:
         yield test_client
 
@@ -187,3 +192,137 @@ def test_scheduler_lifecycle():
 
     assert scheduler_task.done()
     assert scheduler_task.cancelled()
+
+
+def test_history_endpoint_returns_persisted_check(client, monkeypatch):
+    created = client.post(
+        "/api/targets",
+        json={
+            "name": "History Test Application",
+            "url": "https://example.com/health",
+        },
+    ).json()
+
+    async def fake_check_target(service, target_id):
+        target = next(
+            item
+            for item in service.list_targets()
+            if item.id == target_id
+        )
+
+        now = datetime.now(timezone.utc)
+
+        return CheckResult(
+            target_id=target.id,
+            name=target.name,
+            url=target.url,
+            status="UP",
+            status_code=200,
+            latency_ms=25.5,
+            checked_at=now,
+            consecutive_failures=0,
+            last_success_at=now,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        MonitoringService,
+        "check_target",
+        fake_check_target,
+    )
+
+    check_response = client.post(
+        f"/api/targets/{created['id']}/check"
+    )
+
+    assert check_response.status_code == 200
+
+    history_response = client.get(
+        f"/api/targets/{created['id']}/history"
+    )
+
+    assert history_response.status_code == 200
+
+    history = history_response.json()["history"]
+
+    assert len(history) == 1
+    assert history[0]["status"] == "UP"
+    assert history[0]["status_code"] == 200
+
+
+def test_target_and_history_survive_application_restart(
+    tmp_path,
+    monkeypatch,
+):
+    database_path = tmp_path / "restart-test.db"
+
+    monkeypatch.setenv(
+        "PULSECHECK_DB_PATH",
+        str(database_path),
+    )
+
+    async def fake_check_target(service, target_id):
+        target = next(
+            item
+            for item in service.list_targets()
+            if item.id == target_id
+        )
+
+        now = datetime.now(timezone.utc)
+
+        return CheckResult(
+            target_id=target.id,
+            name=target.name,
+            url=target.url,
+            status="UP",
+            status_code=200,
+            latency_ms=30.0,
+            checked_at=now,
+            consecutive_failures=0,
+            last_success_at=now,
+            error=None,
+        )
+
+    monkeypatch.setattr(
+        MonitoringService,
+        "check_target",
+        fake_check_target,
+    )
+
+    with TestClient(app) as first_client:
+        created = first_client.post(
+            "/api/targets",
+            json={
+                "name": "Persistent Application",
+                "url": "https://example.com/health",
+            },
+        )
+
+        assert created.status_code == 201
+
+        target_id = created.json()["id"]
+
+        check_response = first_client.post(
+            f"/api/targets/{target_id}/check"
+        )
+
+        assert check_response.status_code == 200
+
+    # Simulate application shutdown and a fresh startup.
+    with TestClient(app) as second_client:
+        targets_response = second_client.get("/api/targets")
+
+        assert targets_response.status_code == 200
+
+        targets = targets_response.json()["targets"]
+
+        assert len(targets) == 1
+        assert targets[0]["target"]["id"] == target_id
+        assert targets[0]["last_check"]["status"] == "UP"
+
+        history_response = second_client.get(
+            f"/api/targets/{target_id}/history"
+        )
+
+        assert history_response.status_code == 200
+        assert len(history_response.json()["history"]) == 1
