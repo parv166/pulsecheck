@@ -176,3 +176,14 @@ def test_unknown_target_returns_404(client):
     )
 
     assert response.status_code == 404
+def test_scheduler_lifecycle():
+    with TestClient(app) as test_client:
+        scheduler_task = (
+            test_client.app.state.monitoring_scheduler_task
+        )
+
+        assert scheduler_task is not None
+        assert not scheduler_task.done()
+
+    assert scheduler_task.done()
+    assert scheduler_task.cancelled()

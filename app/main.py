@@ -1,4 +1,7 @@
 import os
+import asyncio
+
+from app.scheduler import run_monitoring_scheduler
 from contextlib import asynccontextmanager
 from time import perf_counter
 from collections.abc import AsyncIterator
@@ -46,13 +49,40 @@ class TargetCreate(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    interval = float(
+        os.getenv("PULSECHECK_CHECK_INTERVAL_SECONDS", "10")
+    )
+
+    if interval <= 0:
+        raise ValueError(
+            "PULSECHECK_CHECK_INTERVAL_SECONDS must be positive."
+        )
+
     service = MonitoringService()
     app.state.monitoring_service = service
 
+    scheduler_task = asyncio.create_task(
+        run_monitoring_scheduler(
+            service,
+            interval_seconds=interval,
+        ),
+        name="pulsecheck-monitoring-scheduler",
+    )
+
+    app.state.monitoring_scheduler_task = scheduler_task
+
     try:
         yield
+
     finally:
-        await service.close()
+        scheduler_task.cancel()
+
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await service.close()
 
 
 app = FastAPI(
