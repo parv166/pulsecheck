@@ -11,6 +11,10 @@ services:
 
     environment:
       APP_VERSION: "1.0.0"
+      PULSECHECK_DB_PATH: "/app/data/pulsecheck.db"
+
+    volumes:
+      - pulsecheck_data:/app/data
 
     restart: unless-stopped
 
@@ -122,3 +126,4 @@ volumes:
   prometheus_data:
   grafana_data:
   alertmanager_data:
+  pulsecheck_data:

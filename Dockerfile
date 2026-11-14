@@ -29,7 +29,10 @@ RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
 # 8. Copy application code
 COPY --chown=app:app app/ ./app/
 
-# 9. Run as non-root user
+# Create persistent database directory
+RUN mkdir -p /app/data && chown app:app /app/data
+
+# Run as non-root user
 USER app
 
 # 10. Application port
