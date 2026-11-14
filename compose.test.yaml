@@ -1,0 +1,57 @@
+services:
+  pulsecheck:
+    environment:
+      PULSECHECK_TEST_MODE: "true"
+      PULSECHECK_TEST_ALLOWED_HOST: "health-simulator"
+      PULSECHECK_TEST_ALLOWED_IP: "172.30.50.10"
+    networks:
+      default: {}
+      pulsecheck-test:
+        ipv4_address: 172.30.50.2
+
+  health-simulator:
+    image: python:3.14-slim
+    command: ["python", "-u", "/app/server.py"]
+
+    volumes:
+      - ./test-support/health-simulator/server.py:/app/server.py:ro
+
+    networks:
+      pulsecheck-test:
+        ipv4_address: 172.30.50.10
+
+    user: "65534:65534"
+    read_only: true
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/container-health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+    restart: unless-stopped
+
+networks:
+  default: {}
+
+  pulsecheck-test:
+    name: pulsecheck-test-monitoring
+    driver: bridge
+    internal: true
+
+    ipam:
+      config:
+        - subnet: 172.30.50.0/24

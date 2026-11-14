@@ -147,8 +147,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "PULSECHECK_CHECK_INTERVAL_SECONDS must be positive."
         )
 
+    test_mode = (
+        os.getenv("PULSECHECK_TEST_MODE", "").lower() == "true"
+    )
+    test_host = os.getenv("PULSECHECK_TEST_ALLOWED_HOST")
+    test_ip = os.getenv("PULSECHECK_TEST_ALLOWED_IP")
+
+    if test_mode:
+        if not test_host or not test_ip:
+            raise ValueError(
+                "Test mode requires PULSECHECK_TEST_ALLOWED_HOST "
+                "and PULSECHECK_TEST_ALLOWED_IP."
+            )
+
+        allowed_test_destinations = {
+            test_host: {test_ip}
+        }
+    else:
+        if test_host or test_ip:
+            raise ValueError(
+                "Test destination allowlist variables require "
+                "PULSECHECK_TEST_MODE=true."
+            )
+
+        allowed_test_destinations = {}
+
     database = await asyncio.to_thread(Database, db_path)
-    service = MonitoringService()
+    service = MonitoringService(
+        allowed_test_destinations=allowed_test_destinations
+    )
     scheduler_task = None
 
     try:

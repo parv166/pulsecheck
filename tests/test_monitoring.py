@@ -1,9 +1,14 @@
 import asyncio
+import socket
 
 import httpx
 import pytest
 
-from app.monitoring import MonitoringService, validate_target_url
+from app.monitoring import (
+    MonitoringService,
+    ensure_public_destination,
+    validate_target_url,
+)
 
 
 def test_valid_public_url():
@@ -94,3 +99,60 @@ def test_remove_target():
     assert service.remove_target(target.id) is False
     assert service.list_targets() == []
     assert service.get_result(target.id) is None
+
+def test_test_allowlist_requires_exact_private_destination(monkeypatch):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        async def fake_getaddrinfo(hostname, port, *, type):
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("172.30.50.10", port),
+                )
+            ]
+
+        monkeypatch.setattr(
+            loop,
+            "getaddrinfo",
+            fake_getaddrinfo,
+        )
+
+        url = "http://health-simulator:8080/health"
+
+        # Exact configured hostname/IP pair is allowed.
+        await ensure_public_destination(
+            url,
+            {"health-simulator": {"172.30.50.10"}},
+        )
+
+        # A different configured IP must be rejected.
+        with pytest.raises(
+            ValueError,
+            match="configured private IP",
+        ):
+            await ensure_public_destination(
+                url,
+                {"health-simulator": {"172.30.50.11"}},
+            )
+
+        # No allowlist means private addresses remain blocked.
+        with pytest.raises(
+            ValueError,
+            match="private or non-public",
+        ):
+            await ensure_public_destination(url)
+
+    asyncio.run(scenario())
+
+
+def test_test_allowlist_rejects_public_ip():
+    with pytest.raises(ValueError, match="private"):
+        MonitoringService(
+            allowed_test_destinations={
+                "health-simulator": {"8.8.8.8"}
+            }
+        )

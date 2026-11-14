@@ -91,29 +91,28 @@ def validate_target_url(url: str) -> str:
     return url
 
 
-async def ensure_public_destination(url: str) -> None:
+async def ensure_public_destination(
+    url: str,
+    allowed_test_destinations: dict[str, set[str]] | None = None,
+) -> None:
     """
-    Resolve the hostname and reject non-public IP addresses.
-
-    This is an additional SSRF defense. Production deployments should
-    also enforce outbound network restrictions.
+    Reject non-public destinations except for an exact, explicitly
+    configured test hostname and its expected private IP.
     """
 
     parsed = urlsplit(url)
-    hostname = parsed.hostname
+    hostname = parsed.hostname.lower().rstrip(".")
     port = parsed.port or (
         443 if parsed.scheme.lower() == "https" else 80
     )
 
     try:
         loop = asyncio.get_running_loop()
-
         addresses = await loop.getaddrinfo(
             hostname,
             port,
             type=socket.SOCK_STREAM,
         )
-
     except socket.gaierror as exc:
         raise ValueError(
             "Target hostname could not be resolved."
@@ -122,12 +121,23 @@ async def ensure_public_destination(url: str) -> None:
     if not addresses:
         raise ValueError("Target hostname has no resolved addresses.")
 
-    for address in addresses:
-        ip = ipaddress.ip_address(
-            address[4][0].split("%")[0]
-        )
+    resolved_ips = {
+        str(ipaddress.ip_address(address[4][0].split("%")[0]))
+        for address in addresses
+    }
 
-        if not ip.is_global:
+    allowed_ips = (allowed_test_destinations or {}).get(hostname)
+
+    if allowed_ips is not None:
+        if resolved_ips != allowed_ips:
+            raise ValueError(
+                "Test destination did not resolve exclusively "
+                "to its configured private IP address."
+            )
+        return
+
+    for address in resolved_ips:
+        if not ipaddress.ip_address(address).is_global:
             raise ValueError(
                 "Target resolves to a private or non-public IP address."
             )
@@ -141,6 +151,7 @@ class MonitoringService:
         max_concurrency: int = 20,
         client: httpx.AsyncClient | None = None,
         resolve_dns: bool = True,
+        allowed_test_destinations: dict[str, set[str]] | None = None,
     ):
         if timeout <= 0:
             raise ValueError("Timeout must be greater than zero.")
@@ -149,6 +160,52 @@ class MonitoringService:
             raise ValueError(
                 "Maximum concurrency must be at least one."
             )
+
+        self._allowed_test_destinations: dict[str, set[str]] = {}
+
+        for hostname, addresses in (
+            allowed_test_destinations or {}
+        ).items():
+            normalized_hostname = hostname.lower().rstrip(".")
+
+            if (
+                not normalized_hostname
+                or any(
+                    char in normalized_hostname
+                    for char in "/:@[]"
+                )
+                or any(char.isspace() for char in normalized_hostname)
+            ):
+                raise ValueError(
+                    "Invalid test allowlist hostname."
+                )
+
+            normalized_addresses = {
+                str(ipaddress.ip_address(address))
+                for address in addresses
+            }
+
+            if not normalized_addresses:
+                raise ValueError(
+                    "Test allowlist requires at least one IP address."
+                )
+
+            for address in normalized_addresses:
+                ip = ipaddress.ip_address(address)
+
+                if (
+                    not ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                ):
+                    raise ValueError(
+                        "Test allowlist accepts only private, "
+                        "non-loopback IP addresses."
+                    )
+
+            self._allowed_test_destinations[
+                normalized_hostname
+            ] = normalized_addresses
 
         self._client = client or httpx.AsyncClient(
             timeout=timeout,
@@ -261,7 +318,10 @@ class MonitoringService:
 
         try:
             if self._resolve_dns:
-                await ensure_public_destination(target.url)
+                await ensure_public_destination(
+                    target.url,
+                    self._allowed_test_destinations,
+                )
 
             async with self._semaphore:
 
