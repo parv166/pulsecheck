@@ -83,3 +83,14 @@ groups:
         annotations:
           summary: "Ubuntu root disk usage is high"
           description: "Root filesystem usage has exceeded 85% for 5 minutes."
+
+  - name: pulsecheck-monitored-applications
+    rules:
+      - alert: MonitoredApplicationDown
+        expr: pulsecheck_monitored_target_up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Monitored application {{ $labels.target_name }} is DOWN'
+          description: 'Target {{ $labels.target_name }} (ID: {{ $labels.target_id }}) has been reporting DOWN for at least 30 seconds.'

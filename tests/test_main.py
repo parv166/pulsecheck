@@ -326,3 +326,64 @@ def test_target_and_history_survive_application_restart(
 
         assert history_response.status_code == 200
         assert len(history_response.json()["history"]) == 1
+
+
+def test_monitored_target_metrics_exposed(client, monkeypatch):
+    created = client.post(
+        "/api/targets",
+        json={
+            "name": "Metrics Test",
+            "url": "https://example.com/health",
+        },
+    ).json()
+
+    async def fake_check_target(service, target_id):
+        target = next(
+            item
+            for item in service.list_targets()
+            if item.id == target_id
+        )
+
+        now = datetime.now(timezone.utc)
+
+        result = CheckResult(
+            target_id=target.id,
+            name=target.name,
+            url=target.url,
+            status="UP",
+            status_code=200,
+            latency_ms=125.0,
+            checked_at=now,
+            consecutive_failures=0,
+            last_success_at=now,
+            error=None,
+        )
+
+        # Mimic the state update performed by the real check method.
+        service._results[target_id] = result
+
+        return result
+
+    monkeypatch.setattr(
+        MonitoringService,
+        "check_target",
+        fake_check_target,
+    )
+
+    check = client.post(
+        f"/api/targets/{created['id']}/check"
+    )
+
+    assert check.status_code == 200
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+
+    metrics = response.text
+
+    assert "pulsecheck_monitored_target_up" in metrics
+    assert "pulsecheck_monitored_target_response_time_seconds" in metrics
+    assert "pulsecheck_monitored_target_consecutive_failures" in metrics
+    assert "pulsecheck_monitored_target_last_check_timestamp_seconds" in metrics
+    assert 'target_name="Metrics Test"' in metrics

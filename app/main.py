@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -35,6 +36,90 @@ REQUEST_LATENCY = Histogram(
     "HTTP request processing duration in seconds",
     ["method", "path"],
 )
+
+
+MONITORED_TARGET_UP = Gauge(
+    "pulsecheck_monitored_target_up",
+    "Whether the monitored application is UP (1) or DOWN (0).",
+    ["target_id", "target_name"],
+)
+
+MONITORED_TARGET_RESPONSE_TIME = Gauge(
+    "pulsecheck_monitored_target_response_time_seconds",
+    "Latest monitored application response time in seconds.",
+    ["target_id", "target_name"],
+)
+
+MONITORED_TARGET_FAILURES = Gauge(
+    "pulsecheck_monitored_target_consecutive_failures",
+    "Current consecutive monitoring failures.",
+    ["target_id", "target_name"],
+)
+
+MONITORED_TARGET_LAST_CHECK = Gauge(
+    "pulsecheck_monitored_target_last_check_timestamp_seconds",
+    "Unix timestamp of the latest monitoring check.",
+    ["target_id", "target_name"],
+)
+
+_TARGET_METRICS = (
+    MONITORED_TARGET_UP,
+    MONITORED_TARGET_RESPONSE_TIME,
+    MONITORED_TARGET_FAILURES,
+    MONITORED_TARGET_LAST_CHECK,
+)
+
+_EXPOSED_TARGET_LABELS: dict[str, tuple[str, str]] = {}
+
+
+def sync_monitored_target_metrics(service: MonitoringService) -> None:
+    """Publish the latest monitoring state as Prometheus gauges."""
+
+    targets = {
+        target.id: target
+        for target in service.list_targets()
+    }
+
+    # Remove stale metric series for deleted targets.
+    for target_id, old_labels in list(
+        _EXPOSED_TARGET_LABELS.items()
+    ):
+        target = targets.get(target_id)
+
+        if target is None or old_labels != (
+            target.id,
+            target.name,
+        ):
+            for metric in _TARGET_METRICS:
+                metric.remove(*old_labels)
+
+            del _EXPOSED_TARGET_LABELS[target_id]
+
+    # Publish the latest result for each registered target.
+    for target in targets.values():
+        result = service.get_result(target.id)
+
+        if result is None:
+            continue
+
+        labels = (target.id, target.name)
+        _EXPOSED_TARGET_LABELS[target.id] = labels
+
+        MONITORED_TARGET_UP.labels(*labels).set(
+            1 if result.status == "UP" else 0
+        )
+
+        MONITORED_TARGET_RESPONSE_TIME.labels(*labels).set(
+            result.latency_ms / 1000.0
+        )
+
+        MONITORED_TARGET_FAILURES.labels(*labels).set(
+            result.consecutive_failures
+        )
+
+        MONITORED_TARGET_LAST_CHECK.labels(*labels).set(
+            result.checked_at.timestamp()
+        )
 
 
 class TargetCreate(BaseModel):
@@ -361,7 +446,11 @@ async def delete_target(
 
 
 @app.get("/metrics", include_in_schema=False)
-async def metrics():
+async def metrics(request: Request):
+    service = request.app.state.monitoring_service
+
+    sync_monitored_target_metrics(service)
+
     return Response(
         content=generate_latest(),
         media_type=CONTENT_TYPE_LATEST,
