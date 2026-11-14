@@ -162,3 +162,43 @@ def test_scheduler_detects_failure_and_recovery():
                     await task
 
     asyncio.run(scenario())
+def test_scheduler_persists_results():
+    async def scenario():
+        class FakeService:
+            async def check_all(self):
+                return ["monitoring-result"]
+
+        class FakeDatabase:
+            def __init__(self):
+                self.saved_batches = []
+
+            def save_results(self, results):
+                self.saved_batches.append(results)
+
+        service = FakeService()
+        database = FakeDatabase()
+
+        task = asyncio.create_task(
+            run_monitoring_scheduler(
+                service,
+                interval_seconds=0.02,
+                database=database,
+            )
+        )
+
+        try:
+            for _ in range(100):
+                if database.saved_batches:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert database.saved_batches == [
+            ["monitoring-result"]
+        ]
+
+    asyncio.run(scenario())
