@@ -209,6 +209,33 @@ class MonitoringService:
     def list_targets(self) -> list[MonitoredTarget]:
         return list(self._targets.values())
 
+    def restore_target(
+        self,
+        target: MonitoredTarget,
+        result: CheckResult | None = None,
+    ) -> None:
+        """Restore a target and its latest result from persistent storage."""
+
+        validate_target_url(target.url)
+
+        if not target.name.strip():
+            raise ValueError("Stored target has an invalid name.")
+
+        if target.id in self._targets:
+            raise ValueError("Monitoring target is already registered.")
+
+        if result is not None and result.target_id != target.id:
+            raise ValueError("Monitoring result belongs to another target.")
+
+        self._targets[target.id] = target
+
+        if result is not None:
+            self._results[target.id] = result
+            self._failures[target.id] = result.consecutive_failures
+
+            if result.last_success_at is not None:
+                self._last_success[target.id] = result.last_success_at
+
     def get_result(
         self,
         target_id: str,

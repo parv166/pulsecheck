@@ -127,8 +127,32 @@ class Database:
         return cursor.rowcount > 0
 
     def save_result(self, result: CheckResult) -> None:
+        self.save_results([result])
+
+    def save_results(self, results: list[CheckResult]) -> None:
+        records = [
+            (
+                result.target_id,
+                result.status,
+                result.status_code,
+                result.latency_ms,
+                result.checked_at.isoformat(),
+                result.consecutive_failures,
+                (
+                    result.last_success_at.isoformat()
+                    if result.last_success_at
+                    else None
+                ),
+                result.error,
+            )
+            for result in results
+        ]
+
+        if not records:
+            return
+
         with self._connection() as connection:
-            connection.execute(
+            connection.executemany(
                 """
                 INSERT INTO monitoring_history (
                     target_id,
@@ -142,20 +166,7 @@ class Database:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    result.target_id,
-                    result.status,
-                    result.status_code,
-                    result.latency_ms,
-                    result.checked_at.isoformat(),
-                    result.consecutive_failures,
-                    (
-                        result.last_success_at.isoformat()
-                        if result.last_success_at
-                        else None
-                    ),
-                    result.error,
-                ),
+                records,
             )
 
     @staticmethod

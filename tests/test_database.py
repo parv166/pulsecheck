@@ -109,3 +109,27 @@ def test_delete_target_cascades_history(tmp_path):
     assert db.get_target(target.id) is None
     assert db.get_latest_result(target.id) is None
     assert db.delete_target(target.id) is False
+
+
+def test_save_results_batch(tmp_path):
+    db = Database(tmp_path / "pulsecheck.db")
+    target = create_target()
+
+    db.save_target(target)
+
+    first = create_result(target)
+    second = create_result(target)
+
+    db.save_results([first, second])
+
+    history = db.list_history(target.id, limit=10)
+
+    assert len(history) == 2
+
+
+def test_save_results_empty_list(tmp_path):
+    db = Database(tmp_path / "pulsecheck.db")
+
+    db.save_results([])
+
+    assert db.list_targets() == []
