@@ -16,6 +16,19 @@ services:
     volumes:
       - pulsecheck_data:/app/data
 
+    read_only: true
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+
+    pids_limit: 100
+
     restart: unless-stopped
 
   prometheus:
