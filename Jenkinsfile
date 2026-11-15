@@ -8,6 +8,14 @@ pipeline {
         skipDefaultCheckout(true)
     }
 
+    parameters {
+        booleanParam(
+            name: 'DEPLOY_TO_AWS',
+            defaultValue: false,
+            description: 'Enable only when intentionally pushing to ECR and deploying to EC2.'
+        )
+    }
+
     stages {
 
         stage('Checkout') {
@@ -139,6 +147,9 @@ pipeline {
         }
 
         stage('Push Image to Amazon ECR') {
+            when {
+                expression { params.DEPLOY_TO_AWS }
+            }
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'aws-ecr-push',
@@ -193,6 +204,9 @@ pipeline {
         }
 
         stage('Deploy to EC2') {
+            when {
+                expression { params.DEPLOY_TO_AWS }
+            }
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -351,7 +365,7 @@ REMOTE_SCRIPT
 
     post {
         success {
-            echo 'PulseCheck CI, ECR publishing and EC2 deployment completed successfully!'
+            echo 'PulseCheck CI pipeline completed successfully.'
         }
 
         failure {
