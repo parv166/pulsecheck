@@ -103,17 +103,37 @@ pipeline {
                     set -eu
 
                     container="pulsecheck-ci-${BUILD_NUMBER}"
+                    volume="${container}-data"
                     host_port=$((18000 + BUILD_NUMBER))
 
                     cleanup() {
                         docker rm -f "$container" >/dev/null 2>&1 || true
+                        docker volume rm "$volume" >/dev/null 2>&1 || true
                     }
 
                     trap cleanup EXIT
 
+                    docker volume create "$volume" >/dev/null
+
+                    echo "Initializing persistent volume permissions..."
+
+                    docker run --rm \
+                      --user 0:0 \
+                      --entrypoint sh \
+                      --mount "source=$volume,target=/app/data" \
+                      "pulsecheck:${BUILD_NUMBER}" \
+                      -c 'chown app:app /app/data && chmod 750 /app/data'
+
+                    echo "Starting hardened PulseCheck container..."
+
                     docker run -d \
                       --name "$container" \
+                      --read-only \
+                      --cap-drop=ALL \
                       --security-opt=no-new-privileges:true \
+                      --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+                      --pids-limit=100 \
+                      --mount "source=$volume,target=/app/data" \
                       -p "127.0.0.1:${host_port}:8000" \
                       -e APP_VERSION="ci-${BUILD_NUMBER}" \
                       "pulsecheck:${BUILD_NUMBER}"
@@ -121,7 +141,12 @@ pipeline {
                     for attempt in $(seq 1 30); do
                         if curl -fsS "http://127.0.0.1:${host_port}/health"; then
                             echo
-                            echo "Container smoke test successful"
+
+                            docker exec "$container" sh -c \
+                              'test -w /app/data && test -s /app/data/pulsecheck.db'
+
+                            echo "PASS: SQLite database exists and is writable on persistent volume"
+                            echo "Hardened container smoke test successful"
                             exit 0
                         fi
 
@@ -237,10 +262,35 @@ pipeline {
                           "$EC2_SSH_USER@$EC2_HOST" \
                           "bash -s -- '${BUILD_NUMBER}'" <<'REMOTE_SCRIPT'
 
-set -euo pipefail
+set -Eeuo pipefail
 
 BUILD_TAG="$1"
 AWS_REGION="ap-south-1"
+
+APP_CONTAINER="pulsecheck-app"
+PREVIOUS_CONTAINER="pulsecheck-app-previous"
+CANDIDATE_CONTAINER="pulsecheck-candidate-${BUILD_TAG}"
+
+PRODUCTION_VOLUME="pulsecheck-data"
+CANDIDATE_VOLUME="pulsecheck-candidate-${BUILD_TAG}-data"
+CANDIDATE_PORT=18081
+
+DEPLOYMENT_COMPLETE=0
+OLD_CONTAINER_EXISTS=0
+DOCKER_CONFIG_DIR=""
+
+cleanup_ecr_credentials() {
+    if [ -n "${DOCKER_CONFIG_DIR:-}" ]; then
+        sudo rm -rf "$DOCKER_CONFIG_DIR" || true
+        DOCKER_CONFIG_DIR=""
+    fi
+}
+
+trap cleanup_ecr_credentials EXIT
+
+if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+    OLD_CONTAINER_EXISTS=1
+fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity \
   --region "$AWS_REGION" \
@@ -250,15 +300,9 @@ ACCOUNT_ID=$(aws sts get-caller-identity \
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/pulsecheck:${BUILD_TAG}"
 
-echo "Authenticating with ECR using EC2 IAM role..."
+echo "===== AUTHENTICATING WITH AMAZON ECR ====="
 
 DOCKER_CONFIG_DIR=$(sudo mktemp -d /tmp/pulsecheck-ecr.XXXXXX)
-
-cleanup() {
-    sudo rm -rf "$DOCKER_CONFIG_DIR"
-}
-
-trap cleanup EXIT
 
 aws ecr get-login-password --region "$AWS_REGION" \
   | sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
@@ -266,101 +310,208 @@ aws ecr get-login-password --region "$AWS_REGION" \
       --username AWS \
       --password-stdin "$REGISTRY"
 
-echo "Pulling image: $IMAGE"
+echo "===== PULLING IMAGE ====="
 
-sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
-  docker pull "$IMAGE"
+sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" docker pull "$IMAGE"
 
-cleanup
-trap - EXIT
+sudo rm -rf "$DOCKER_CONFIG_DIR"
+DOCKER_CONFIG_DIR=""
 
-OLD_IMAGE=""
+echo "===== PREPARING ISOLATED CANDIDATE VOLUME ====="
 
-if sudo docker inspect pulsecheck-app >/dev/null 2>&1; then
-    OLD_IMAGE=$(sudo docker inspect \
-      --format '{{.Config.Image}}' pulsecheck-app)
-fi
+sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1 || true
+sudo docker volume create "$CANDIDATE_VOLUME" >/dev/null
 
-restore_previous() {
-    if [ -z "$OLD_IMAGE" ]; then
-        echo "No previous image available for rollback."
-        return 1
-    fi
+sudo docker run --rm \
+  --user 0:0 \
+  --entrypoint sh \
+  --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
+  "$IMAGE" \
+  -c 'chown app:app /app/data && chmod 750 /app/data'
 
-    OLD_VERSION="${OLD_IMAGE##*:}"
+wait_for_app() {
+    local port="$1"
 
-    echo "Restoring previous image: $OLD_IMAGE"
-
-    sudo docker run -d \
-      --name pulsecheck-app \
-      --restart unless-stopped \
-      --security-opt=no-new-privileges:true \
-      -p 127.0.0.1:8000:8000 \
-      -e APP_VERSION="$OLD_VERSION" \
-      "$OLD_IMAGE"
-
-    for attempt in $(seq 1 20); do
-        if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
-            echo "Previous version restored successfully."
+    for attempt in $(seq 1 30); do
+        if curl -fsS "http://127.0.0.1:${port}/health" >/dev/null \
+          && curl -fsS "http://127.0.0.1:${port}/api/targets" >/dev/null; then
             return 0
         fi
+
         sleep 2
     done
 
-    echo "Rollback health check failed."
-    sudo docker logs pulsecheck-app || true
     return 1
 }
 
-echo "Removing previous container..."
+rollback_and_cleanup() {
+    local exit_status=$?
+    trap - EXIT
 
-sudo docker rm -f pulsecheck-app >/dev/null 2>&1 || true
+    cleanup_ecr_credentials
 
-echo "Starting new PulseCheck container..."
+    if [ "$DEPLOYMENT_COMPLETE" -ne 1 ]; then
+        echo "===== DEPLOYMENT FAILED: RECOVERY ====="
 
-if ! sudo docker run -d \
-    --name pulsecheck-app \
-    --restart unless-stopped \
-    --security-opt=no-new-privileges:true \
-    -p 127.0.0.1:8000:8000 \
-    -e APP_VERSION="$BUILD_TAG" \
-    "$IMAGE"; then
+        if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+            echo "Previous container found. Restoring it..."
 
-    echo "New container failed to start."
-    restore_previous
-    exit 1
-fi
+            sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+            sudo docker rename "$PREVIOUS_CONTAINER" "$APP_CONTAINER"
+            sudo docker start "$APP_CONTAINER" >/dev/null
 
-HEALTH_OK=0
+            echo "Checking previous application recovery..."
 
-for attempt in $(seq 1 20); do
-    if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
-        HEALTH_OK=1
-        break
+            RECOVERY_OK=0
+            for attempt in $(seq 1 30); do
+                if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+                    RECOVERY_OK=1
+                    break
+                fi
+                sleep 2
+            done
+
+            if [ "$RECOVERY_OK" -eq 1 ]; then
+                echo "Previous application restored successfully."
+            else
+                echo "ERROR: Previous application did not recover."
+                sudo docker logs "$APP_CONTAINER" || true
+            fi
+
+        elif [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+            # The production switch never happened. Keep the original container.
+            sudo docker start "$APP_CONTAINER" >/dev/null 2>&1 || true
+
+        else
+            sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+        fi
     fi
-    sleep 2
-done
 
-if [ "$HEALTH_OK" -ne 1 ]; then
-    echo "New deployment failed its health check."
+    sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
+    sudo docker rm "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
+    sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1 || true
 
-    sudo docker logs pulsecheck-app || true
+    exit "$exit_status"
+}
 
-    sudo docker rm -f pulsecheck-app >/dev/null 2>&1 || true
+trap rollback_and_cleanup EXIT
 
-    restore_previous
+echo "===== TESTING NEW IMAGE BEFORE REPLACING PRODUCTION ====="
 
+sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
+
+sudo docker run -d \
+  --name "$CANDIDATE_CONTAINER" \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+  --pids-limit=100 \
+  --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
+  -p "127.0.0.1:${CANDIDATE_PORT}:8000" \
+  -e APP_VERSION="$BUILD_TAG" \
+  -e PULSECHECK_DB_PATH=/app/data/pulsecheck.db \
+  "$IMAGE"
+
+if ! wait_for_app "$CANDIDATE_PORT"; then
+    echo "Candidate application failed health or API checks."
+    sudo docker logs "$CANDIDATE_CONTAINER" || true
     exit 1
 fi
 
-echo "Deployment successful!"
+sudo docker exec "$CANDIDATE_CONTAINER" sh -c \
+  'test -w /app/data && test -s /app/data/pulsecheck.db'
+
+echo "PASS: Candidate application and SQLite database verified."
+
+sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null
+sudo docker rm "$CANDIDATE_CONTAINER" >/dev/null
+
+echo "===== PREPARING PERSISTENT PRODUCTION VOLUME ====="
+
+if sudo docker volume inspect "$PRODUCTION_VOLUME" >/dev/null 2>&1; then
+    echo "Existing production volume found. Preserving its data."
+else
+    sudo docker volume create "$PRODUCTION_VOLUME" >/dev/null
+    echo "New production volume created."
+fi
+
+sudo docker run --rm \
+  --user 0:0 \
+  --entrypoint sh \
+  --mount "type=volume,source=$PRODUCTION_VOLUME,target=/app/data" \
+  "$IMAGE" \
+  -c 'chown app:app /app/data && chmod 750 /app/data'
+
+echo "===== PREPARING PRODUCTION SWITCH ====="
+
+if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+    if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+        echo "Removing older rollback container; current app is available."
+        sudo docker rm -f "$PREVIOUS_CONTAINER" >/dev/null
+    fi
+else
+    if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+        echo "ERROR: Current app is missing but a rollback container exists."
+        echo "Refusing to remove the only available previous container."
+        exit 1
+    fi
+fi
+
+if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+    echo "Stopping current application."
+    sudo docker stop -t 20 "$APP_CONTAINER" >/dev/null
+
+    echo "Preserving current application for rollback."
+    sudo docker rename "$APP_CONTAINER" "$PREVIOUS_CONTAINER"
+fi
+
+echo "===== STARTING NEW PRODUCTION CONTAINER ====="
+
+sudo docker run -d \
+  --name "$APP_CONTAINER" \
+  --restart unless-stopped \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+  --pids-limit=100 \
+  --mount "type=volume,source=$PRODUCTION_VOLUME,target=/app/data" \
+  -p 127.0.0.1:8000:8000 \
+  -e APP_VERSION="$BUILD_TAG" \
+  -e PULSECHECK_DB_PATH=/app/data/pulsecheck.db \
+  "$IMAGE"
+
+echo "===== VERIFYING PRODUCTION DEPLOYMENT ====="
+
+if ! wait_for_app 8000; then
+    echo "New production application failed health or API checks."
+    sudo docker logs "$APP_CONTAINER" || true
+    exit 1
+fi
+
+sudo docker exec "$APP_CONTAINER" sh -c \
+  'test -w /app/data && test -s /app/data/pulsecheck.db'
+
+echo "PASS: Production SQLite database exists and is writable."
+echo "PASS: Production application health and API checks passed."
+
+DEPLOYMENT_COMPLETE=1
+
+echo "===== DEPLOYMENT SUCCESSFUL ====="
 echo "Deployed version: $BUILD_TAG"
+echo "Persistent volume: $PRODUCTION_VOLUME"
+
+if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+    echo "Previous container retained: $PREVIOUS_CONTAINER"
+fi
 
 REMOTE_SCRIPT
                     '''
                 }
             }
         }
+
     }
 
     post {
