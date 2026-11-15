@@ -128,6 +128,16 @@ pipeline {
             }
         }
 
+        stage('End-to-End Monitoring Integration Test') {
+            steps {
+                sh '''
+                    set -eu
+                    echo "Running isolated UP -> DOWN -> UP integration test"
+                    PULSECHECK_IMAGE="pulsecheck:${BUILD_NUMBER}" bash scripts/run-e2e-ci.sh
+                '''
+            }
+        }
+
         stage('Push Image to Amazon ECR') {
             steps {
                 withCredentials([usernamePassword(

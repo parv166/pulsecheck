@@ -15,6 +15,7 @@ def current_status():
 
 
 class HealthHandler(BaseHTTPRequestHandler):
+
     def send_json(self, status, payload):
         body = json.dumps(payload).encode()
 
@@ -32,7 +33,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 
         if self.path == "/health":
             status = current_status()
-
             self.send_json(
                 status,
                 {
@@ -45,8 +45,33 @@ class HealthHandler(BaseHTTPRequestHandler):
 
         self.send_json(404, {"error": "Not found"})
 
+    def do_POST(self):
+        if self.path != "/control":
+            self.send_json(404, {"error": "Not found"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 1 <= length <= 1024:
+                raise ValueError("Invalid request size.")
+
+            payload = json.loads(self.rfile.read(length))
+            status = payload.get("status")
+
+            if status not in (200, 503):
+                raise ValueError("Only HTTP 200 and 503 are supported.")
+
+            STATUS_FILE.write_text(str(status))
+            self.send_json(200, {"configured_status": status})
+
+        except (ValueError, TypeError, json.JSONDecodeError):
+            self.send_json(400, {"error": "Invalid control request."})
+
     def log_message(self, format, *args):
-        print(f"{self.address_string()} - {format % args}", flush=True)
+        print(
+            f"{self.address_string()} - {format % args}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

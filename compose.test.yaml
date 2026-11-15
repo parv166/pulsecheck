@@ -1,13 +1,26 @@
 services:
   pulsecheck:
+    image: "${PULSECHECK_IMAGE:-pulsecheck:1.0.0}"
+    volumes:
+      - ./test-support/integration_test.py:/app/integration_test.py:ro
     environment:
       PULSECHECK_TEST_MODE: "true"
       PULSECHECK_TEST_ALLOWED_HOST: "health-simulator"
-      PULSECHECK_TEST_ALLOWED_IP: "172.30.50.10"
+      PULSECHECK_TEST_ALLOWED_IP: "${PULSECHECK_TEST_SIMULATOR_IP:-172.30.50.10}"
+      PULSECHECK_CHECK_INTERVAL_SECONDS: "5"
+
+    depends_on:
+      health-simulator:
+        condition: service_healthy
+
     networks:
       default: {}
       pulsecheck-test:
-        ipv4_address: 172.30.50.2
+        ipv4_address: "${PULSECHECK_TEST_APP_IP:-172.30.50.2}"
+
+  prometheus:
+    volumes:
+      - ./prometheus/prometheus.ci.yml:/etc/prometheus/prometheus.yml:ro
 
   health-simulator:
     image: python:3.14-slim
@@ -18,7 +31,7 @@ services:
 
     networks:
       pulsecheck-test:
-        ipv4_address: 172.30.50.10
+        ipv4_address: "${PULSECHECK_TEST_SIMULATOR_IP:-172.30.50.10}"
 
     user: "65534:65534"
     read_only: true
@@ -48,10 +61,9 @@ networks:
   default: {}
 
   pulsecheck-test:
-    name: pulsecheck-test-monitoring
     driver: bridge
     internal: true
 
     ipam:
       config:
-        - subnet: 172.30.50.0/24
+        - subnet: "${PULSECHECK_TEST_SUBNET:-172.30.50.0/24}"
