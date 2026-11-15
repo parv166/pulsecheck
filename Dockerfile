@@ -12,7 +12,17 @@ WORKDIR /app
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
-RUN chmod u-s /usr/bin/mount /usr/bin/umount
+RUN chmod u-s /usr/bin/mount /usr/bin/umount \
+    && chmod a-s \
+        /usr/bin/newgrp \
+        /usr/bin/chage \
+        /usr/bin/su \
+        /usr/bin/chfn \
+        /usr/bin/gpasswd \
+        /usr/bin/chsh \
+        /usr/bin/passwd \
+        /usr/bin/expiry \
+        /usr/sbin/unix_chkpwd
 
 # 5. Create a non-root application user
 RUN groupadd --system app && \
