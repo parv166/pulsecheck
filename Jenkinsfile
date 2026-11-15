@@ -171,6 +171,16 @@ pipeline {
             }
         }
 
+        stage('Deployment Rollback Regression Test') {
+            steps {
+                sh '''
+                    set -eu
+                    bash -n scripts/test-deploy-rollback.sh
+                    bash scripts/test-deploy-rollback.sh
+                '''
+            }
+        }
+
         stage('Push Image to Amazon ECR') {
             when {
                 expression { params.DEPLOY_TO_AWS }
