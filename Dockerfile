@@ -8,11 +8,10 @@ ENV PYTHONUNBUFFERED=1
 # 3. Application working directory
 WORKDIR /app
 
-# 4 Update installed Debian packages
+# 4. Update packages, harden utilities, create app user, and remove unused tools
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
-    && rm -rf /var/lib/apt/lists/*
-RUN chmod u-s /usr/bin/mount /usr/bin/umount \
+    && chmod u-s /usr/bin/mount /usr/bin/umount \
     && chmod a-s \
         /usr/bin/newgrp \
         /usr/bin/chage \
@@ -22,19 +21,22 @@ RUN chmod u-s /usr/bin/mount /usr/bin/umount \
         /usr/bin/chsh \
         /usr/bin/passwd \
         /usr/bin/expiry \
-        /usr/sbin/unix_chkpwd
-
-# 5. Create a non-root application user
-RUN groupadd --system app && \
-    useradd --system --gid app --create-home app
+        /usr/sbin/unix_chkpwd \
+    && groupadd --system app \
+    && useradd --system --gid app --create-home app \
+    && apt-get purge -y passwd \
+    && apt-get autoremove -y --purge \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # 6. Copy dependency file
 COPY requirements.txt .
 
 # 7. Install dependencies
-# Upgrade pip to update its bundled vulnerable libraries
+# Install application dependencies, then remove build-time pip
 RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
-    && python -m pip install --no-cache-dir -r requirements.txt
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip
 
 # 8. Copy application code
 COPY --chown=app:app app/ ./app/
