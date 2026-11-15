@@ -277,6 +277,7 @@ CANDIDATE_PORT=18081
 
 DEPLOYMENT_COMPLETE=0
 OLD_CONTAINER_EXISTS=0
+PRODUCTION_SWITCH_STARTED=0
 DOCKER_CONFIG_DIR=""
 
 cleanup_ecr_credentials() {
@@ -353,37 +354,44 @@ rollback_and_cleanup() {
     if [ "$DEPLOYMENT_COMPLETE" -ne 1 ]; then
         echo "===== DEPLOYMENT FAILED: RECOVERY ====="
 
-        if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
-            echo "Previous container found. Restoring it..."
+        if [ "$PRODUCTION_SWITCH_STARTED" -eq 1 ] || \
+           [ "$OLD_CONTAINER_EXISTS" -eq 0 ]; then
 
-            sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-            sudo docker rename "$PREVIOUS_CONTAINER" "$APP_CONTAINER"
-            sudo docker start "$APP_CONTAINER" >/dev/null
+            if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+                echo "Previous container found. Restoring it..."
 
-            echo "Checking previous application recovery..."
+                sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+                sudo docker rename "$PREVIOUS_CONTAINER" "$APP_CONTAINER"
+                sudo docker start "$APP_CONTAINER" >/dev/null
 
-            RECOVERY_OK=0
-            for attempt in $(seq 1 30); do
-                if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
-                    RECOVERY_OK=1
-                    break
+                echo "Checking previous application recovery..."
+
+                RECOVERY_OK=0
+                for attempt in $(seq 1 30); do
+                    if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+                        RECOVERY_OK=1
+                        break
+                    fi
+                    sleep 2
+                done
+
+                if [ "$RECOVERY_OK" -eq 1 ]; then
+                    echo "Previous application restored successfully."
+                else
+                    echo "ERROR: Previous application did not recover."
+                    sudo docker logs "$APP_CONTAINER" || true
                 fi
-                sleep 2
-            done
 
-            if [ "$RECOVERY_OK" -eq 1 ]; then
-                echo "Previous application restored successfully."
+            elif [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+                sudo docker start "$APP_CONTAINER" >/dev/null 2>&1 || true
+
             else
-                echo "ERROR: Previous application did not recover."
-                sudo docker logs "$APP_CONTAINER" || true
+                sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
             fi
 
-        elif [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
-            # The production switch never happened. Keep the original container.
-            sudo docker start "$APP_CONTAINER" >/dev/null 2>&1 || true
-
         else
-            sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+            echo "Failure occurred before production switch."
+            echo "Leaving current production and previous rollback containers untouched."
         fi
     fi
 
@@ -457,6 +465,8 @@ else
         exit 1
     fi
 fi
+
+PRODUCTION_SWITCH_STARTED=1
 
 if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
     echo "Stopping current application."
