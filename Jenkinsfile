@@ -679,7 +679,7 @@ print("Destination ownership: 65532:65532")
 '
 
 else
-    echo "No current production container detected."
+    echo "No existing production data volume detected."
 
     for legacy_volume in pulsecheck-data pulsecheck_pulsecheck_data; do
         if sudo docker volume inspect "$legacy_volume" >/dev/null 2>&1; then
@@ -787,6 +787,16 @@ if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
         sudo docker rm -f "$PREVIOUS_CONTAINER" >/dev/null
     fi
 
+fi
+
+# Stop the old container to release production port 8000.
+if [ "$OLD_CONTAINER_EXISTS" -eq 1 ] \
+  && [ "$OLD_CONTAINER_STOPPED" -eq 0 ]; then
+
+    echo "===== GRACEFULLY STOPPING OLD PRODUCTION CONTAINER ====="
+
+    sudo docker stop -t 30 "$APP_CONTAINER" >/dev/null
+    OLD_CONTAINER_STOPPED=1
 fi
 
 PRODUCTION_SWITCH_STARTED=1
