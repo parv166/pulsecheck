@@ -22,7 +22,8 @@ def test_home(client):
     response = client.get("/")
 
     assert response.status_code == 200
-    assert response.json()["application"] == "PulseCheck"
+    assert "text/html" in response.headers["content-type"]
+    assert "PulseCheck" in response.text
 
 
 def test_health(client):

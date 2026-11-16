@@ -3,10 +3,12 @@ import os
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -18,6 +20,7 @@ from prometheus_client import (
 
 from app.database import Database
 from app.monitoring import MonitoringService
+from app.notifications import WebhookNotifier
 from app.scheduler import run_monitoring_scheduler
 
 
@@ -172,13 +175,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         allowed_test_destinations = {}
 
-    database = await asyncio.to_thread(Database, db_path)
-    service = MonitoringService(
-        allowed_test_destinations=allowed_test_destinations
-    )
+    notifier: WebhookNotifier | None = None
+    service: MonitoringService | None = None
     scheduler_task = None
 
     try:
+        webhook_url = os.getenv("PULSECHECK_WEBHOOK_URL", "").strip()
+        if webhook_url:
+            notifier = WebhookNotifier(webhook_url)
+
+        database = await asyncio.to_thread(Database, db_path)
+        service = MonitoringService(
+            allowed_test_destinations=allowed_test_destinations,
+            on_transition=(
+                notifier.notify_transition
+                if notifier is not None
+                else None
+            ),
+        )
+
         # Restore registered applications and their latest results.
         stored_targets = await asyncio.to_thread(
             database.list_targets
@@ -217,14 +232,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             except asyncio.CancelledError:
                 pass
 
-        await service.close()
+        if service is not None:
+            await service.close()
 
+        if notifier is not None:
+            await notifier.close()
+
+
+APP_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(
     title=APP_NAME,
-    description="DevOps and Infrastructure Operations Platform",
+    description="Developer-focused website and API monitoring",
     version=APP_VERSION,
     lifespan=lifespan,
+)
+
+app.mount(
+    "/static",
+    StaticFiles(directory=APP_DIR / "static"),
+    name="static",
 )
 
 
@@ -259,13 +286,9 @@ async def collect_request_metrics(request: Request, call_next):
         ).observe(duration)
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def home():
-    return {
-        "application": APP_NAME,
-        "message": "Welcome to PulseCheck",
-        "version": APP_VERSION,
-    }
+    return FileResponse(APP_DIR / "templates" / "index.html")
 
 
 @app.get("/health")

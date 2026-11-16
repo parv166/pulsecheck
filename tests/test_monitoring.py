@@ -156,3 +156,45 @@ def test_test_allowlist_rejects_public_ip():
                 "health-simulator": {"8.8.8.8"}
             }
         )
+
+
+def test_transition_callback_only_notifies_status_changes():
+    async def scenario():
+        statuses = [200, 503, 503, 200]
+        transitions = []
+
+        def handler(request):
+            return httpx.Response(status_code=statuses.pop(0))
+
+        async def notify(previous, current):
+            transitions.append((previous.status, current.status))
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            service = MonitoringService(
+                client=client,
+                resolve_dns=False,
+                on_transition=notify,
+            )
+
+            target = service.register_target(
+                "Demo Application",
+                "https://example.com/health",
+            )
+
+            results = [
+                await service.check_target(target.id)
+                for _ in range(4)
+            ]
+
+            assert [result.status for result in results] == [
+                "UP", "DOWN", "DOWN", "UP"
+            ]
+
+            assert transitions == [
+                ("UP", "DOWN"),
+                ("DOWN", "UP"),
+            ]
+
+    asyncio.run(scenario())

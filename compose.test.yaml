@@ -8,6 +8,7 @@ services:
       PULSECHECK_TEST_ALLOWED_HOST: "health-simulator"
       PULSECHECK_TEST_ALLOWED_IP: "${PULSECHECK_TEST_SIMULATOR_IP:-172.30.50.10}"
       PULSECHECK_CHECK_INTERVAL_SECONDS: "5"
+      PULSECHECK_WEBHOOK_URL: ${PULSECHECK_WEBHOOK_URL:-}
 
     depends_on:
       health-simulator:

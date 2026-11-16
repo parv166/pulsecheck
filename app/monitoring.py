@@ -1,6 +1,8 @@
 import asyncio
 import ipaddress
+import logging
 import socket
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
@@ -30,6 +32,14 @@ class CheckResult:
     consecutive_failures: int
     last_success_at: datetime | None
     error: str | None
+
+
+TransitionCallback = Callable[
+    [CheckResult, CheckResult],
+    Awaitable[None],
+]
+
+logger = logging.getLogger(__name__)
 
 
 def validate_target_url(url: str) -> str:
@@ -152,6 +162,7 @@ class MonitoringService:
         client: httpx.AsyncClient | None = None,
         resolve_dns: bool = True,
         allowed_test_destinations: dict[str, set[str]] | None = None,
+        on_transition: TransitionCallback | None = None,
     ):
         if timeout <= 0:
             raise ValueError("Timeout must be greater than zero.")
@@ -215,6 +226,7 @@ class MonitoringService:
 
         self._owns_client = client is None
         self._resolve_dns = resolve_dns
+        self._on_transition = on_transition
 
         self._targets: dict[str, MonitoredTarget] = {}
         self._results: dict[str, CheckResult] = {}
@@ -369,6 +381,8 @@ class MonitoringService:
                     f"Monitoring target was removed: {target_id}"
                 )
 
+            previous_result = self._results.get(target_id)
+
             if healthy:
                 failures = 0
                 last_success_at = checked_at
@@ -394,6 +408,23 @@ class MonitoringService:
             )
 
             self._results[target_id] = result
+
+        # Notify only when an existing target changes status.
+        # Initial checks and repeated statuses do not generate alerts.
+        if (
+            previous_result is not None
+            and previous_result.status != result.status
+            and self._on_transition is not None
+        ):
+            try:
+                await self._on_transition(previous_result, result)
+            except Exception as exc:
+                # Notification failure must never interrupt monitoring.
+                logger.warning(
+                    "Transition notification failed for target %s (%s).",
+                    target_id,
+                    type(exc).__name__,
+                )
 
         return result
 

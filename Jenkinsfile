@@ -406,6 +406,30 @@ PRODUCTION_SWITCH_STARTED=0
 OLD_VOLUME=""
 DOCKER_CONFIG_DIR=""
 
+# Validate production Discord notification secret before deployment.
+SECRET_ENV_FILE="/etc/pulsecheck-secrets/pulsecheck.env"
+
+echo "===== VALIDATING PRODUCTION DISCORD SECRET ====="
+
+if ! sudo test -s "$SECRET_ENV_FILE"; then
+    echo "ERROR: Production Discord secret file is missing or empty."
+    exit 1
+fi
+
+SECRET_OWNER_MODE=$(sudo stat -c '%U:%a' "$SECRET_ENV_FILE")
+
+if [ "$SECRET_OWNER_MODE" != "root:600" ]; then
+    echo "ERROR: Discord secret file must be owned by root with mode 600."
+    exit 1
+fi
+
+if ! sudo grep -Eq '^PULSECHECK_WEBHOOK_URL=https://discord\.com/api/webhooks/[0-9]+/[^[:space:]]+$' "$SECRET_ENV_FILE"; then
+    echo "ERROR: Discord webhook configuration is invalid."
+    exit 1
+fi
+
+echo "PASS: Production Discord secret validated (value hidden)."
+
 cleanup_ecr_credentials() {
     if [ -n "${DOCKER_CONFIG_DIR:-}" ]; then
         sudo rm -rf "$DOCKER_CONFIG_DIR" || true
@@ -818,6 +842,7 @@ sudo docker run -d \
   --pids-limit=100 \
   --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
   -p 127.0.0.1:8000:8000 \
+  --env-file "$SECRET_ENV_FILE" \
   -e APP_VERSION="$BUILD_TAG" \
   -e PULSECHECK_DB_PATH=/app/data/pulsecheck.db \
   "$IMAGE"
