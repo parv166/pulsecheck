@@ -165,11 +165,14 @@ pipeline {
 
                     image="pulsecheck:${BUILD_NUMBER}"
 
-                    echo "===== Raw Critical Vulnerability Quality Gate ====="
+                    echo "===== VEX-aware HIGH/CRITICAL Quality Gate ====="
+
+                    test -s dhi-python-vex.json
 
                     trivy image \
                       --scanners vuln \
-                      --severity CRITICAL \
+                      --vex dhi-python-vex.json \
+                      --severity HIGH,CRITICAL \
                       --format table \
                       --exit-code 1 \
                       "$image"
