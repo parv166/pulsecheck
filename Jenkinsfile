@@ -507,6 +507,43 @@ if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
     OLD_CONTAINER_EXISTS=1
 fi
 
+# A running legacy container does not necessarily have persistent SQLite data.
+# Detect the actual /app/data mount independently of container existence.
+OLD_DATA_VOLUME_EXISTS=0
+
+if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+    OLD_DATA_MOUNT_TYPE=$(sudo docker inspect \
+      --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Type}}{{end}}{{end}}' \
+      "$APP_CONTAINER")
+
+    case "$OLD_DATA_MOUNT_TYPE" in
+        volume)
+            OLD_VOLUME=$(sudo docker inspect \
+              --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}{{end}}' \
+              "$APP_CONTAINER")
+
+            if [ -z "$OLD_VOLUME" ]; then
+                echo "ERROR: /app/data is mounted as a volume but its name could not be identified."
+                exit 1
+            fi
+
+            OLD_DATA_VOLUME_EXISTS=1
+            ;;
+        bind)
+            echo "ERROR: Existing production uses a bind mount at /app/data."
+            echo "Manual inspection is required before migrating this deployment."
+            exit 1
+            ;;
+        "")
+            echo "Legacy stateless production container detected: no /app/data mount."
+            ;;
+        *)
+            echo "ERROR: Unsupported /app/data mount type: $OLD_DATA_MOUNT_TYPE"
+            exit 1
+            ;;
+    esac
+fi
+
 if [ "$OLD_CONTAINER_EXISTS" -eq 0 ] \
   && sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
 
@@ -547,7 +584,7 @@ fi
 
 sudo docker volume create "$CANDIDATE_VOLUME" >/dev/null
 
-if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+if [ "$OLD_DATA_VOLUME_EXISTS" -eq 1 ]; then
 
     echo "===== IDENTIFYING CURRENT PRODUCTION VOLUME ====="
 
@@ -652,7 +689,8 @@ else
         fi
     done
 
-    echo "===== INITIALIZING FIRST-DEPLOYMENT VOLUME ====="
+    echo "===== INITIALIZING NEW DATA VOLUME ====="
+    echo "First deployment or legacy stateless upgrade."
 
     sudo docker run --rm \
       --user 0:0 \
@@ -808,10 +846,15 @@ echo "Production volume: $CANDIDATE_VOLUME"
 
 if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
     echo "Previous container retained: $PREVIOUS_CONTAINER"
-    echo "Previous data volume retained: $OLD_VOLUME"
 fi
 
-echo "The previous production data volume was not modified."
+if [ "$OLD_DATA_VOLUME_EXISTS" -eq 1 ]; then
+    echo "Previous data volume retained: $OLD_VOLUME"
+    echo "The previous production data volume was not modified."
+else
+    echo "No previous /app/data Docker volume existed."
+    echo "A new empty SQLite database was initialized for this deployment."
+fi
 
 REMOTE_SCRIPT
                     '''
