@@ -423,7 +423,7 @@ if [ "$SECRET_OWNER_MODE" != "root:600" ]; then
     exit 1
 fi
 
-if ! sudo grep -Eq '^PULSECHECK_WEBHOOK_URL=https://discord\.com/api/webhooks/[0-9]+/[^[:space:]]+$' "$SECRET_ENV_FILE"; then
+if ! sudo grep -Eq '^PULSECHECK_WEBHOOK_URL=https://discord[.]com/api/webhooks/[0-9]+/[^[:space:]]+$' "$SECRET_ENV_FILE"; then
     echo "ERROR: Discord webhook configuration is invalid."
     exit 1
 fi
