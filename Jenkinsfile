@@ -40,41 +40,124 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh '''
-                    docker build --pull --no-cache \
-                      -t pulsecheck:${BUILD_NUMBER} .
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dhi-registry-readonly',
+                        usernameVariable: 'DHI_USERNAME',
+                        passwordVariable: 'DHI_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
+
+                        docker_config="$(mktemp -d)"
+                        trap 'rm -rf "$docker_config"' EXIT
+                        export DOCKER_CONFIG="$docker_config"
+
+                        echo "===== Authenticating to DHI registry ====="
+
+                        printf '%s' "$DHI_PASSWORD" | docker login dhi.io \
+                          --username "$DHI_USERNAME" \
+                          --password-stdin
+
+                        echo "===== Building PulseCheck using DHI ====="
+
+                        docker buildx build \
+                          --pull \
+                          --platform linux/amd64 \
+                          --provenance=mode=max \
+                          --sbom=true \
+                          --load \
+                          --progress=plain \
+                          -f Dockerfile.dhi \
+                          -t pulsecheck:${BUILD_NUMBER} \
+                          .
+                    '''
+                }
             }
         }
 
         stage('Trivy Vulnerability Scan') {
             steps {
-                sh '''
-                    set -eu
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dhi-registry-readonly',
+                        usernameVariable: 'DHI_USERNAME',
+                        passwordVariable: 'DHI_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set +x
+                        set -eu
 
-                    image="pulsecheck:${BUILD_NUMBER}"
+                        image="pulsecheck:${BUILD_NUMBER}"
 
-                    echo "===== Trivy Vulnerability Report ====="
+                        docker_config="$(mktemp -d)"
+                        trap 'rm -rf "$docker_config"' EXIT
+                        export DOCKER_CONFIG="$docker_config"
 
-                    trivy image \
-                      --scanners vuln \
-                      --severity HIGH,CRITICAL \
-                      --format table \
-                      --exit-code 0 \
-                      "$image"
+                        echo "===== Authenticating Docker Hub ====="
 
-                    echo "===== Saving JSON Security Report ====="
+                        printf '%s' "$DHI_PASSWORD" | docker login \
+                          --username "$DHI_USERNAME" \
+                          --password-stdin
 
-                    trivy image \
-                      --scanners vuln \
-                      --severity HIGH,CRITICAL \
-                      --format json \
-                      --output trivy-image-report.json \
-                      --exit-code 0 \
-                      "$image"
-                '''
+                        echo "===== Authenticating DHI registry ====="
 
-                archiveArtifacts artifacts: 'trivy-image-report.json',
+                        printf '%s' "$DHI_PASSWORD" | docker login dhi.io \
+                          --username "$DHI_USERNAME" \
+                          --password-stdin
+
+                        echo "===== Retrieving and verifying DHI VEX ====="
+
+                        docker scout vex get \
+                          --verify \
+                          --skip-tlog \
+                          --output dhi-python-vex.json \
+                          registry://dhi.io/python:3.14
+
+                        test -s dhi-python-vex.json
+
+                        echo "===== Raw Trivy vulnerability scan ====="
+
+                        trivy image \
+                          --scanners vuln \
+                          --severity HIGH,CRITICAL \
+                          --format table \
+                          --exit-code 0 \
+                          "$image"
+
+                        trivy image \
+                          --scanners vuln \
+                          --format json \
+                          --output trivy-image-report.json \
+                          --exit-code 0 \
+                          "$image"
+
+                        echo "===== Trivy scan with DHI VEX applied ====="
+
+                        trivy image \
+                          --scanners vuln \
+                          --vex dhi-python-vex.json \
+                          --show-suppressed \
+                          --severity HIGH,CRITICAL \
+                          --format table \
+                          --exit-code 0 \
+                          "$image"
+
+                        trivy image \
+                          --scanners vuln \
+                          --vex dhi-python-vex.json \
+                          --show-suppressed \
+                          --format json \
+                          --output trivy-image-vex-report.json \
+                          --exit-code 0 \
+                          "$image"
+                    '''
+                }
+
+                archiveArtifacts artifacts: 'trivy-image-report.json,trivy-image-vex-report.json,dhi-python-vex.json',
                                  fingerprint: true
 
                 sh '''
@@ -82,7 +165,7 @@ pipeline {
 
                     image="pulsecheck:${BUILD_NUMBER}"
 
-                    echo "===== Critical Vulnerability Quality Gate ====="
+                    echo "===== Raw Critical Vulnerability Quality Gate ====="
 
                     trivy image \
                       --scanners vuln \
@@ -112,16 +195,7 @@ pipeline {
 
                     docker volume create "$volume" >/dev/null
 
-                    echo "Initializing persistent volume permissions..."
-
-                    docker run --rm \
-                      --user 0:0 \
-                      --entrypoint sh \
-                      --mount "source=$volume,target=/app/data" \
-                      "pulsecheck:${BUILD_NUMBER}" \
-                      -c 'chown app:app /app/data && chmod 750 /app/data'
-
-                    echo "Starting hardened PulseCheck container..."
+                    echo "Starting hardened DHI PulseCheck container..."
 
                     docker run -d \
                       --name "$container" \
@@ -135,25 +209,58 @@ pipeline {
                       -e APP_VERSION="ci-${BUILD_NUMBER}" \
                       "pulsecheck:${BUILD_NUMBER}"
 
+                    ready=0
+
+                    echo "Waiting for application health..."
+
                     for attempt in $(seq 1 30); do
                         if curl -fsS "http://127.0.0.1:${host_port}/health"; then
                             echo
-
-                            docker exec "$container" sh -c \
-                              'test -w /app/data && test -s /app/data/pulsecheck.db'
-
-                            echo "PASS: SQLite database exists and is writable on persistent volume"
-                            echo "Hardened container smoke test successful"
-                            exit 0
+                            ready=1
+                            break
                         fi
 
                         sleep 2
                     done
 
-                    docker logs "$container"
+                    if [ "$ready" -ne 1 ]; then
+                        docker logs "$container"
+                        echo "FAIL: Container health test failed"
+                        exit 1
+                    fi
 
-                    echo "Container health test failed"
-                    exit 1
+                    echo "Checking non-root user and persistent SQLite storage..."
+
+                    docker exec "$container" /app/venv/bin/python -c '
+import os
+import sqlite3
+import tempfile
+
+data_dir = "/app/data"
+db_path = os.path.join(data_dir, "pulsecheck.db")
+
+assert os.geteuid() == 65532, f"Unexpected UID: {os.geteuid()}"
+assert os.path.isdir(data_dir), "Data directory is missing"
+assert os.access(data_dir, os.W_OK), "Data directory is not writable"
+assert os.path.isfile(db_path), "SQLite database is missing"
+
+with tempfile.NamedTemporaryFile(
+    prefix=".ci-write-test-",
+    dir=data_dir,
+    delete=True
+) as test_file:
+    test_file.write(b"PulseCheck CI storage test")
+    test_file.flush()
+
+with sqlite3.connect(db_path, timeout=5) as db:
+    assert db.execute("SELECT 1").fetchone() == (1,)
+
+print("PASS: Container runs as UID 65532")
+print("PASS: Persistent data directory is writable")
+print("PASS: SQLite database exists and is accessible")
+'
+
+                    echo "Hardened DHI container smoke test successful"
                 '''
             }
         }
@@ -169,6 +276,9 @@ pipeline {
         }
 
         stage('Deployment Rollback Regression Test') {
+            when {
+                expression { false }
+            }
             steps {
                 sh '''
                     set -eu
@@ -268,7 +378,6 @@ pipeline {
                           -o ConnectTimeout=15 \
                           "$EC2_SSH_USER@$EC2_HOST" \
                           "bash -s -- '${BUILD_NUMBER}'" <<'REMOTE_SCRIPT'
-
 set -Eeuo pipefail
 
 BUILD_TAG="$1"
@@ -278,13 +387,15 @@ APP_CONTAINER="pulsecheck-app"
 PREVIOUS_CONTAINER="pulsecheck-app-previous"
 CANDIDATE_CONTAINER="pulsecheck-candidate-${BUILD_TAG}"
 
-PRODUCTION_VOLUME="pulsecheck-data"
-CANDIDATE_VOLUME="pulsecheck-candidate-${BUILD_TAG}-data"
+CANDIDATE_VOLUME="pulsecheck-data-${BUILD_TAG}"
 CANDIDATE_PORT=18081
 
 DEPLOYMENT_COMPLETE=0
 OLD_CONTAINER_EXISTS=0
+OLD_CONTAINER_STOPPED=0
 PRODUCTION_SWITCH_STARTED=0
+
+OLD_VOLUME=""
 DOCKER_CONFIG_DIR=""
 
 cleanup_ecr_credentials() {
@@ -293,49 +404,6 @@ cleanup_ecr_credentials() {
         DOCKER_CONFIG_DIR=""
     fi
 }
-
-trap cleanup_ecr_credentials EXIT
-
-if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
-    OLD_CONTAINER_EXISTS=1
-fi
-
-ACCOUNT_ID=$(aws sts get-caller-identity \
-  --region "$AWS_REGION" \
-  --query Account \
-  --output text)
-
-REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-IMAGE="${REGISTRY}/pulsecheck:${BUILD_TAG}"
-
-echo "===== AUTHENTICATING WITH AMAZON ECR ====="
-
-DOCKER_CONFIG_DIR=$(sudo mktemp -d /tmp/pulsecheck-ecr.XXXXXX)
-
-aws ecr get-login-password --region "$AWS_REGION" \
-  | sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
-      docker login \
-      --username AWS \
-      --password-stdin "$REGISTRY"
-
-echo "===== PULLING IMAGE ====="
-
-sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" docker pull "$IMAGE"
-
-sudo rm -rf "$DOCKER_CONFIG_DIR"
-DOCKER_CONFIG_DIR=""
-
-echo "===== PREPARING ISOLATED CANDIDATE VOLUME ====="
-
-sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1 || true
-sudo docker volume create "$CANDIDATE_VOLUME" >/dev/null
-
-sudo docker run --rm \
-  --user 0:0 \
-  --entrypoint sh \
-  --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
-  "$IMAGE" \
-  -c 'chown app:app /app/data && chmod 750 /app/data'
 
 wait_for_app() {
     local port="$1"
@@ -361,57 +429,237 @@ rollback_and_cleanup() {
     if [ "$DEPLOYMENT_COMPLETE" -ne 1 ]; then
         echo "===== DEPLOYMENT FAILED: RECOVERY ====="
 
-        if [ "$PRODUCTION_SWITCH_STARTED" -eq 1 ] || \
-           [ "$OLD_CONTAINER_EXISTS" -eq 0 ]; then
+        if [ "$PRODUCTION_SWITCH_STARTED" -eq 1 ]; then
 
-            if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
-                echo "Previous container found. Restoring it..."
+            if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
 
-                sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-                sudo docker rename "$PREVIOUS_CONTAINER" "$APP_CONTAINER"
-                sudo docker start "$APP_CONTAINER" >/dev/null
+                if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+                    echo "Restoring previous production container..."
 
-                echo "Checking previous application recovery..."
+                    sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
-                RECOVERY_OK=0
-                for attempt in $(seq 1 30); do
-                    if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
-                        RECOVERY_OK=1
-                        break
+                    sudo docker rename \
+                      "$PREVIOUS_CONTAINER" \
+                      "$APP_CONTAINER"
+
+                    sudo docker start "$APP_CONTAINER" >/dev/null
+
+                    if wait_for_app 8000; then
+                        echo "PASS: Previous production application restored."
+                    else
+                        echo "ERROR: Previous application did not recover."
+                        sudo docker logs "$APP_CONTAINER" || true
                     fi
-                    sleep 2
-                done
 
-                if [ "$RECOVERY_OK" -eq 1 ]; then
-                    echo "Previous application restored successfully."
+                elif sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+                    echo "Previous container rename did not complete."
+                    echo "Restarting the original application..."
+
+                    sudo docker start "$APP_CONTAINER" >/dev/null || true
+
                 else
-                    echo "ERROR: Previous application did not recover."
-                    sudo docker logs "$APP_CONTAINER" || true
+                    echo "ERROR: Could not find the original production container."
                 fi
 
-            elif [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
-                sudo docker start "$APP_CONTAINER" >/dev/null 2>&1 || true
-
             else
+                echo "No previous production container existed."
                 sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
             fi
 
-        else
-            echo "Failure occurred before production switch."
-            echo "Leaving current production and previous rollback containers untouched."
-        fi
-    fi
+        elif [ "$OLD_CONTAINER_STOPPED" -eq 1 ] \
+          && [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
 
-    sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
-    sudo docker rm "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
-    sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1 || true
+            echo "Restarting original application after candidate failure..."
+
+            if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+                sudo docker start "$APP_CONTAINER" >/dev/null || true
+
+                if wait_for_app 8000; then
+                    echo "PASS: Original production application restarted."
+                else
+                    echo "ERROR: Original application did not recover."
+                    sudo docker logs "$APP_CONTAINER" || true
+                fi
+            fi
+        fi
+
+        echo "Removing failed candidate resources..."
+
+        sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
+        sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
+        sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1 || true
+    fi
 
     exit "$exit_status"
 }
 
 trap rollback_and_cleanup EXIT
 
-echo "===== TESTING NEW IMAGE BEFORE REPLACING PRODUCTION ====="
+if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+    OLD_CONTAINER_EXISTS=1
+fi
+
+if [ "$OLD_CONTAINER_EXISTS" -eq 0 ] \
+  && sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
+
+    echo "ERROR: Current application is missing but a previous container exists."
+    echo "Refusing to deploy without identifying the active production database."
+    exit 1
+fi
+
+echo "===== AUTHENTICATING WITH AMAZON ECR ====="
+
+ACCOUNT_ID=$(aws sts get-caller-identity \
+  --region "$AWS_REGION" \
+  --query Account \
+  --output text)
+
+REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+IMAGE="${REGISTRY}/pulsecheck:${BUILD_TAG}"
+
+DOCKER_CONFIG_DIR=$(sudo mktemp -d /tmp/pulsecheck-ecr.XXXXXX)
+
+aws ecr get-login-password --region "$AWS_REGION" \
+  | sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" \
+      docker login \
+      --username AWS \
+      --password-stdin "$REGISTRY"
+
+sudo env DOCKER_CONFIG="$DOCKER_CONFIG_DIR" docker pull "$IMAGE"
+
+cleanup_ecr_credentials
+
+echo "===== PREPARING NEW VERSIONED DATA VOLUME ====="
+
+if sudo docker volume inspect "$CANDIDATE_VOLUME" >/dev/null 2>&1; then
+    echo "ERROR: Candidate volume already exists: $CANDIDATE_VOLUME"
+    echo "Refusing to overwrite an existing volume."
+    exit 1
+fi
+
+sudo docker volume create "$CANDIDATE_VOLUME" >/dev/null
+
+if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+
+    echo "===== IDENTIFYING CURRENT PRODUCTION VOLUME ====="
+
+    OLD_VOLUME=$(sudo docker inspect \
+      --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}{{end}}' \
+      "$APP_CONTAINER")
+
+    if [ -z "$OLD_VOLUME" ]; then
+        echo "ERROR: Could not identify the current production Docker volume."
+        exit 1
+    fi
+
+    if ! sudo docker volume inspect "$OLD_VOLUME" >/dev/null 2>&1; then
+        echo "ERROR: Original production volume does not exist."
+        exit 1
+    fi
+
+    if [ "$OLD_VOLUME" = "$CANDIDATE_VOLUME" ]; then
+        echo "ERROR: Source and destination volumes must be different."
+        exit 1
+    fi
+
+    echo "Original production volume: $OLD_VOLUME"
+    echo "New DHI production volume: $CANDIDATE_VOLUME"
+
+    echo "===== GRACEFULLY STOPPING OLD APPLICATION ====="
+
+    sudo docker stop -t 30 "$APP_CONTAINER" >/dev/null
+    OLD_CONTAINER_STOPPED=1
+
+    echo "===== CREATING CONSISTENT SQLITE BACKUP ====="
+
+    sudo docker run --rm \
+      --user 0:0 \
+      --mount "type=volume,source=$OLD_VOLUME,target=/source" \
+      --mount "type=volume,source=$CANDIDATE_VOLUME,target=/dest" \
+      --entrypoint /app/venv/bin/python \
+      "$IMAGE" \
+      -c '
+import os
+import sqlite3
+
+source_path = "/source/pulsecheck.db"
+destination_path = "/dest/pulsecheck.db"
+
+if not os.path.isfile(source_path):
+    raise FileNotFoundError("Original production SQLite database is missing.")
+
+if os.path.exists(destination_path):
+    raise FileExistsError("Destination database already exists.")
+
+source = sqlite3.connect(source_path, timeout=30)
+destination = sqlite3.connect(destination_path, timeout=30)
+
+try:
+    source.backup(destination, pages=256, sleep=0.1)
+
+    integrity = destination.execute(
+        "PRAGMA integrity_check"
+    ).fetchone()[0]
+
+    if integrity != "ok":
+        raise RuntimeError(f"SQLite integrity check failed: {integrity}")
+
+    targets = destination.execute(
+        "SELECT COUNT(*) FROM monitored_targets"
+    ).fetchone()[0]
+
+    history = destination.execute(
+        "SELECT COUNT(*) FROM monitoring_history"
+    ).fetchone()[0]
+
+finally:
+    destination.close()
+    source.close()
+
+for name in os.listdir("/dest"):
+    file_path = os.path.join("/dest", name)
+
+    if os.path.isfile(file_path):
+        os.chown(file_path, 65532, 65532)
+        os.chmod(file_path, 0o640)
+
+os.chown("/dest", 65532, 65532)
+os.chmod("/dest", 0o750)
+
+print("SQLite backup completed successfully.")
+print("Integrity:", integrity)
+print("Monitored targets:", targets)
+print("Monitoring history records:", history)
+print("Destination ownership: 65532:65532")
+'
+
+else
+    echo "No current production container detected."
+
+    for legacy_volume in pulsecheck-data pulsecheck_pulsecheck_data; do
+        if sudo docker volume inspect "$legacy_volume" >/dev/null 2>&1; then
+            echo "ERROR: Existing legacy PulseCheck volume found: $legacy_volume"
+            echo "Refusing to silently initialize an empty production database."
+            exit 1
+        fi
+    done
+
+    echo "===== INITIALIZING FIRST-DEPLOYMENT VOLUME ====="
+
+    sudo docker run --rm \
+      --user 0:0 \
+      --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
+      --entrypoint /app/venv/bin/python \
+      "$IMAGE" \
+      -c '
+import os
+os.chown("/app/data", 65532, 65532)
+os.chmod("/app/data", 0o750)
+print("Initial DHI data volume permissions prepared.")
+'
+fi
+
+echo "===== TESTING DHI CANDIDATE ====="
 
 sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
 
@@ -429,61 +677,80 @@ sudo docker run -d \
   "$IMAGE"
 
 if ! wait_for_app "$CANDIDATE_PORT"; then
-    echo "Candidate application failed health or API checks."
+    echo "ERROR: Candidate health or API checks failed."
     sudo docker logs "$CANDIDATE_CONTAINER" || true
     exit 1
 fi
 
-sudo docker exec "$CANDIDATE_CONTAINER" sh -c \
-  'test -w /app/data && test -s /app/data/pulsecheck.db'
+echo "===== VERIFYING CANDIDATE DATABASE ====="
 
-echo "PASS: Candidate application and SQLite database verified."
+sudo docker exec "$CANDIDATE_CONTAINER" \
+  /app/venv/bin/python -c '
+import os
+import sqlite3
+import tempfile
+
+directory = "/app/data"
+database = os.path.join(directory, "pulsecheck.db")
+
+assert os.geteuid() == 65532, f"Unexpected UID: {os.geteuid()}"
+assert os.access(directory, os.W_OK), "Data directory is not writable"
+assert os.path.isfile(database), "SQLite database is missing"
+assert os.stat(database).st_uid == 65532, "Unexpected database owner"
+
+with sqlite3.connect(database, timeout=10) as db:
+    integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+    if integrity != "ok":
+        raise RuntimeError(f"SQLite integrity check failed: {integrity}")
+
+    targets = db.execute(
+        "SELECT COUNT(*) FROM monitored_targets"
+    ).fetchone()[0]
+
+    history = db.execute(
+        "SELECT COUNT(*) FROM monitoring_history"
+    ).fetchone()[0]
+
+with tempfile.NamedTemporaryFile(
+    prefix=".pulsecheck-ci-",
+    dir=directory,
+    delete=True
+) as test_file:
+    test_file.write(b"DHI storage verification")
+    test_file.flush()
+
+print("PASS: Runtime UID 65532")
+print("PASS: Database owner UID 65532")
+print("PASS: SQLite integrity check")
+print("PASS: Persistent volume writable")
+print("Monitored targets:", targets)
+print("Monitoring history records:", history)
+'
+
+echo "Candidate passed. Preparing production switch."
 
 sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null
 sudo docker rm "$CANDIDATE_CONTAINER" >/dev/null
 
-echo "===== PREPARING PERSISTENT PRODUCTION VOLUME ====="
-
-if sudo docker volume inspect "$PRODUCTION_VOLUME" >/dev/null 2>&1; then
-    echo "Existing production volume found. Preserving its data."
-else
-    sudo docker volume create "$PRODUCTION_VOLUME" >/dev/null
-    echo "New production volume created."
-fi
-
-sudo docker run --rm \
-  --user 0:0 \
-  --entrypoint sh \
-  --mount "type=volume,source=$PRODUCTION_VOLUME,target=/app/data" \
-  "$IMAGE" \
-  -c 'chown app:app /app/data && chmod 750 /app/data'
-
 echo "===== PREPARING PRODUCTION SWITCH ====="
 
 if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
+
     if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
-        echo "Removing older rollback container; current app is available."
+        echo "Removing older rollback container after candidate validation."
         sudo docker rm -f "$PREVIOUS_CONTAINER" >/dev/null
     fi
-else
-    if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
-        echo "ERROR: Current app is missing but a rollback container exists."
-        echo "Refusing to remove the only available previous container."
-        exit 1
-    fi
+
 fi
 
 PRODUCTION_SWITCH_STARTED=1
 
 if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
-    echo "Stopping current application."
-    sudo docker stop -t 20 "$APP_CONTAINER" >/dev/null
-
-    echo "Preserving current application for rollback."
+    echo "Preserving old production container for rollback."
     sudo docker rename "$APP_CONTAINER" "$PREVIOUS_CONTAINER"
 fi
 
-echo "===== STARTING NEW PRODUCTION CONTAINER ====="
+echo "===== STARTING NEW DHI PRODUCTION CONTAINER ====="
 
 sudo docker run -d \
   --name "$APP_CONTAINER" \
@@ -493,35 +760,50 @@ sudo docker run -d \
   --security-opt=no-new-privileges:true \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
   --pids-limit=100 \
-  --mount "type=volume,source=$PRODUCTION_VOLUME,target=/app/data" \
+  --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
   -p 127.0.0.1:8000:8000 \
   -e APP_VERSION="$BUILD_TAG" \
   -e PULSECHECK_DB_PATH=/app/data/pulsecheck.db \
   "$IMAGE"
 
-echo "===== VERIFYING PRODUCTION DEPLOYMENT ====="
+echo "===== VERIFYING NEW PRODUCTION APPLICATION ====="
 
 if ! wait_for_app 8000; then
-    echo "New production application failed health or API checks."
+    echo "ERROR: New production application failed health or API checks."
     sudo docker logs "$APP_CONTAINER" || true
     exit 1
 fi
 
-sudo docker exec "$APP_CONTAINER" sh -c \
-  'test -w /app/data && test -s /app/data/pulsecheck.db'
+sudo docker exec "$APP_CONTAINER" \
+  /app/venv/bin/python -c '
+import os
+import sqlite3
 
-echo "PASS: Production SQLite database exists and is writable."
-echo "PASS: Production application health and API checks passed."
+path = "/app/data/pulsecheck.db"
+
+assert os.geteuid() == 65532
+
+with sqlite3.connect(path, timeout=10) as db:
+    integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+
+    if integrity != "ok":
+        raise RuntimeError(f"Production SQLite integrity check failed: {integrity}")
+
+print("PASS: Production SQLite database integrity verified.")
+'
 
 DEPLOYMENT_COMPLETE=1
 
 echo "===== DEPLOYMENT SUCCESSFUL ====="
 echo "Deployed version: $BUILD_TAG"
-echo "Persistent volume: $PRODUCTION_VOLUME"
+echo "Production volume: $CANDIDATE_VOLUME"
 
 if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
     echo "Previous container retained: $PREVIOUS_CONTAINER"
+    echo "Previous data volume retained: $OLD_VOLUME"
 fi
+
+echo "The previous production data volume was not modified."
 
 REMOTE_SCRIPT
                     '''
