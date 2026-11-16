@@ -118,6 +118,7 @@ pipeline {
                           registry://dhi.io/python:3.14
 
                         test -s dhi-python-vex.json
+                        test -s pulsecheck-vex.json
 
                         echo "===== Raw Trivy vulnerability scan ====="
 
@@ -140,6 +141,7 @@ pipeline {
                         trivy image \
                           --scanners vuln \
                           --vex dhi-python-vex.json \
+                          --vex pulsecheck-vex.json \
                           --show-suppressed \
                           --severity HIGH,CRITICAL \
                           --format table \
@@ -149,6 +151,7 @@ pipeline {
                         trivy image \
                           --scanners vuln \
                           --vex dhi-python-vex.json \
+                          --vex pulsecheck-vex.json \
                           --show-suppressed \
                           --format json \
                           --output trivy-image-vex-report.json \
@@ -157,7 +160,7 @@ pipeline {
                     '''
                 }
 
-                archiveArtifacts artifacts: 'trivy-image-report.json,trivy-image-vex-report.json,dhi-python-vex.json',
+                archiveArtifacts artifacts: 'trivy-image-report.json,trivy-image-vex-report.json,dhi-python-vex.json,pulsecheck-vex.json',
                                  fingerprint: true
 
                 sh '''
@@ -168,10 +171,12 @@ pipeline {
                     echo "===== VEX-aware HIGH/CRITICAL Quality Gate ====="
 
                     test -s dhi-python-vex.json
+                    test -s pulsecheck-vex.json
 
                     trivy image \
                       --scanners vuln \
                       --vex dhi-python-vex.json \
+                      --vex pulsecheck-vex.json \
                       --severity HIGH,CRITICAL \
                       --format table \
                       --exit-code 1 \

@@ -1,0 +1,23 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "urn:uuid:ff17333f-c11e-4a3e-b1bd-409e490b9819",
+  "author": "PulseCheck Project Security Assessment",
+  "timestamp": "2026-11-16T18:11:00+05:30",
+  "version": 1,
+  "statements": [
+    {
+      "@id": "urn:uuid:422fdd1e-57d0-4584-a240-5b7e720d2482",
+      "vulnerability": {
+        "name": "CVE-2026-128241"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/libexpat1@2.9.0-1~deb13u1%2Bdhi2?arch=amd64&distro=debian-13.7"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "status_notes": "The vulnerability affects the xmlwf executable when using its -d output mode. Build 33 runtime verification found no xmlwf executable on PATH. The Trivy package inventory lists only libexpat shared libraries and documentation, not xmlwf. This assessment applies to the exact installed libexpat1 package version identified above."
+    }
+  ]
+}
