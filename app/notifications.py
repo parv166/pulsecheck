@@ -42,10 +42,10 @@ class WebhookNotifier:
 
     async def notify_transition(
         self,
-        previous: CheckResult,
+        previous: CheckResult | None,
         current: CheckResult,
     ) -> None:
-        if previous.status == current.status:
+        if previous is not None and previous.status == current.status:
             return
 
         is_down = current.status == "DOWN"
@@ -65,7 +65,11 @@ class WebhookNotifier:
         fields = [
             {
                 "name": "Status change",
-                "value": f"{previous.status} → {current.status}",
+                "value": (
+                    f"{previous.status} → {current.status}"
+                    if previous is not None
+                    else f"First check → {current.status}"
+                ),
                 "inline": True,
             },
             {

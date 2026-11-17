@@ -198,3 +198,48 @@ def test_transition_callback_only_notifies_status_changes():
             ]
 
     asyncio.run(scenario())
+
+
+def test_first_down_notifies_once_and_recovery_notifies():
+    async def scenario():
+        statuses = [503, 503, 200]
+        transitions = []
+
+        def handler(request):
+            return httpx.Response(status_code=statuses.pop(0))
+
+        async def notify(previous, current):
+            transitions.append((
+                previous.status if previous is not None else None,
+                current.status,
+            ))
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            service = MonitoringService(
+                client=client,
+                resolve_dns=False,
+                on_transition=notify,
+            )
+
+            target = service.register_target(
+                "Demo Application",
+                "https://example.com/health",
+            )
+
+            results = [
+                await service.check_target(target.id)
+                for _ in range(3)
+            ]
+
+            assert [result.status for result in results] == [
+                "DOWN", "DOWN", "UP"
+            ]
+
+            assert transitions == [
+                (None, "DOWN"),
+                ("DOWN", "UP"),
+            ]
+
+    asyncio.run(scenario())

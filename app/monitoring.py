@@ -35,7 +35,7 @@ class CheckResult:
 
 
 TransitionCallback = Callable[
-    [CheckResult, CheckResult],
+    [CheckResult | None, CheckResult],
     Awaitable[None],
 ]
 
@@ -409,13 +409,17 @@ class MonitoringService:
 
             self._results[target_id] = result
 
-        # Notify only when an existing target changes status.
-        # Initial checks and repeated statuses do not generate alerts.
-        if (
+        # Notify on status changes and on the first DOWN result.
+        # Initial UP and repeated statuses remain silent.
+        should_notify = (
+            previous_result is None
+            and result.status == "DOWN"
+        ) or (
             previous_result is not None
             and previous_result.status != result.status
-            and self._on_transition is not None
-        ):
+        )
+
+        if should_notify and self._on_transition is not None:
             try:
                 await self._on_transition(previous_result, result)
             except Exception as exc:

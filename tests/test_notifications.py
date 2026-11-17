@@ -78,3 +78,36 @@ def test_discord_webhook_rejects_untrusted_hosts():
         WebhookNotifier(
             "https://example.com/api/webhooks/123456789/token"
         )
+
+
+def test_discord_first_check_down_notification():
+    async def scenario():
+        requests = []
+
+        def handler(request):
+            import json
+            requests.append(json.loads(request.content))
+            return httpx.Response(200, json={"id": "test-message"})
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            notifier = WebhookNotifier(
+                "https://discord.com/api/webhooks/123456789/test-token",
+                client=client,
+            )
+
+            await notifier.notify_transition(
+                None,
+                make_result("DOWN", 503, failures=1),
+            )
+
+            assert len(requests) == 1
+
+            embed = requests[0]["embeds"][0]
+            assert embed["title"] == "Monitor DOWN: Example Website"
+            assert embed["fields"][0]["value"] == "First check → DOWN"
+
+            await notifier.close()
+
+    asyncio.run(scenario())
