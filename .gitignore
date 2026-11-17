@@ -9,3 +9,5 @@ data/
 *.db
 *.db-shm
 *.db-wal
+
+/secrets/auth.local.env

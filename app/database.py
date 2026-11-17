@@ -65,6 +65,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS
                     idx_monitoring_history_target_checked
                 ON monitoring_history(target_id, checked_at DESC);
+
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    csrf_token TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_auth_sessions_expires
+                ON auth_sessions(expires_at);
                 """
             )
 
@@ -240,3 +252,65 @@ class Database:
             ).fetchall()
 
         return [self._row_to_result(row) for row in rows]
+
+
+    def create_session(
+        self,
+        token_hash: str,
+        username: str,
+        csrf_token: str,
+        created_at: str,
+        expires_at: str,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO auth_sessions (
+                    token_hash,
+                    username,
+                    csrf_token,
+                    created_at,
+                    expires_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    token_hash,
+                    username,
+                    csrf_token,
+                    created_at,
+                    expires_at,
+                ),
+            )
+
+    def get_session(self, token_hash: str) -> dict | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT token_hash, username, csrf_token,
+                       created_at, expires_at
+                FROM auth_sessions
+                WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+
+        return dict(row) if row is not None else None
+
+    def delete_session(self, token_hash: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+
+        return cursor.rowcount > 0
+
+    def delete_expired_sessions(self, now_iso: str) -> int:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM auth_sessions WHERE expires_at <= ?",
+                (now_iso,),
+            )
+
+        return cursor.rowcount

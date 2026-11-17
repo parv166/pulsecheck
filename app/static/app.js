@@ -1,5 +1,5 @@
 const API = "/api/targets";
-const state = { targets: [], historyTarget: null };
+const state = { targets: [], historyTarget: null, csrfToken: null };
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,8 +21,29 @@ function showToast(message) {
 }
 
 async function requestJSON(url, options = {}) {
-    const response = await fetch(url, options);
+    const method = (options.method || "GET").toUpperCase();
+    const headers = new Headers(options.headers || {});
+
+    if (
+        state.csrfToken &&
+        !["GET", "HEAD", "OPTIONS"].includes(method)
+    ) {
+        headers.set("X-CSRF-Token", state.csrfToken);
+    }
+
+    const response = await fetch(url, {
+        ...options,
+        method,
+        headers,
+        credentials: "same-origin"
+    });
+
     const data = await response.json().catch(() => ({}));
+
+    if (response.status === 401) {
+        window.location.replace("/login");
+        throw new Error("Your session has expired. Please sign in again.");
+    }
 
     if (!response.ok) {
         throw new Error(data.detail || `Request failed (${response.status})`);
@@ -429,17 +450,39 @@ $("add-form").addEventListener("submit", addTarget);
 $("refresh-button").addEventListener("click", loadTargets);
 $("close-history").addEventListener("click", () => $("history-panel").hidden = true);
 
-async function initialize() {
-    await Promise.all([loadTargets(), checkEngine()]);
+$("logout-button").addEventListener("click", async () => {
+    const button = $("logout-button");
+    button.disabled = true;
 
     try {
-        const version = await requestJSON("/version");
-        $("app-version").textContent = `v${version.version}`;
-    } catch {
-        $("app-version").textContent = "";
+        await requestJSON("/api/auth/logout", {
+            method: "POST"
+        });
+        window.location.replace("/login");
+    } catch (error) {
+        showToast(error.message);
+        button.disabled = false;
     }
+});
 
-    window.setInterval(loadTargets, 10000);
+async function initialize() {
+    try {
+        const session = await requestJSON("/api/auth/session");
+        state.csrfToken = session.csrf_token;
+
+        await Promise.all([loadTargets(), checkEngine()]);
+
+        try {
+            const version = await requestJSON("/version");
+            $("app-version").textContent = `v${version.version}`;
+        } catch {
+            $("app-version").textContent = "";
+        }
+
+        window.setInterval(loadTargets, 10000);
+    } catch (error) {
+        console.error("Dashboard initialization failed:", error);
+    }
 }
 
 initialize();

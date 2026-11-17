@@ -428,7 +428,22 @@ if ! sudo grep -Eq '^PULSECHECK_WEBHOOK_URL=https://discord[.]com/api/webhooks/[
     exit 1
 fi
 
-echo "PASS: Production Discord secret validated (value hidden)."
+if ! sudo grep -Eq '^PULSECHECK_ADMIN_USERNAME=[^[:space:]]+$' "$SECRET_ENV_FILE"; then
+    echo "ERROR: Production admin username is missing or invalid."
+    exit 1
+fi
+
+if ! sudo grep -Eq '^PULSECHECK_ADMIN_PASSWORD_HASH=scrypt-v1\$[0-9a-f]{32}\$[0-9a-f]{128}$' "$SECRET_ENV_FILE"; then
+    echo "ERROR: Production admin password hash is missing or invalid."
+    exit 1
+fi
+
+if ! sudo grep -Eq '^PULSECHECK_COOKIE_SECURE=true$' "$SECRET_ENV_FILE"; then
+    echo "ERROR: Production session cookies must use Secure."
+    exit 1
+fi
+
+echo "PASS: Production Discord and admin authentication configuration validated (values hidden)."
 
 cleanup_ecr_credentials() {
     if [ -n "${DOCKER_CONFIG_DIR:-}" ]; then
@@ -442,7 +457,7 @@ wait_for_app() {
 
     for attempt in $(seq 1 30); do
         if curl -fsS "http://127.0.0.1:${port}/health" >/dev/null \
-          && curl -fsS "http://127.0.0.1:${port}/api/targets" >/dev/null; then
+          && curl -fsS "http://127.0.0.1:${port}/version" >/dev/null; then
             return 0
         fi
 

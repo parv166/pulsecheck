@@ -1,8 +1,11 @@
 import json
+import os
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+from http.cookiejar import CookieJar
 from urllib.request import (
+    HTTPCookieProcessor,
     ProxyHandler,
     Request,
     build_opener,
@@ -14,17 +17,27 @@ SIMULATOR = "http://health-simulator:8080"
 
 TARGET_NAME = "Jenkins E2E Failure Test"
 
-opener = build_opener(ProxyHandler({}))
+cookie_jar = CookieJar()
+opener = build_opener(
+    ProxyHandler({}),
+    HTTPCookieProcessor(cookie_jar),
+)
+csrf_token = None
 
 
 def request_json(url, method="GET", payload=None):
     body = None if payload is None else json.dumps(payload).encode()
 
+    headers = {"Content-Type": "application/json"}
+
+    if method not in {"GET", "HEAD", "OPTIONS"} and csrf_token:
+        headers["X-CSRF-Token"] = csrf_token
+
     request = Request(
         url,
         data=body,
         method=method,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
 
     try:
@@ -151,6 +164,32 @@ def set_simulator_status(status):
     print(f"Simulator configured to HTTP {status}", flush=True)
 
 
+def authenticate():
+    global csrf_token
+
+    username = os.environ.get("PULSECHECK_ADMIN_USERNAME")
+    password = os.environ.get("PULSECHECK_E2E_ADMIN_PASSWORD")
+
+    if not username or not password:
+        raise RuntimeError("CI authentication credentials are missing.")
+
+    _, data = request_json(
+        f"{APP}/api/auth/login",
+        method="POST",
+        payload={"username": username, "password": password},
+    )
+
+    if data.get("authenticated") is not True:
+        raise RuntimeError("PulseCheck CI login was rejected.")
+
+    csrf_token = data.get("csrf_token")
+
+    if not csrf_token:
+        raise RuntimeError("PulseCheck login did not return a CSRF token.")
+
+    print("PASS: E2E test authenticated successfully.", flush=True)
+
+
 def main():
     target_id = None
 
@@ -160,6 +199,8 @@ def main():
             lambda: request_json(f"{APP}/health")[1].get("status")
             == "healthy",
         )
+
+        authenticate()
 
         wait_for(
             "Prometheus readiness",

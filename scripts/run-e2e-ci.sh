@@ -48,6 +48,27 @@ export PULSECHECK_HOST_PORT=$((20000 + BUILD_ID % 10000))
 export PROMETHEUS_HOST_PORT=$((30000 + BUILD_ID % 10000))
 export GRAFANA_ADMIN_PASSWORD="ci-test-placeholder"
 
+# Generate a unique, temporary admin credential for this CI run.
+AUTH_CREDENTIALS=$(
+    docker run --rm \
+        --entrypoint /app/venv/bin/python \
+        "$IMAGE" \
+        -c 'import secrets; from app.auth import hash_password; password = secrets.token_urlsafe(32); print(password); print(hash_password(password))'
+)
+
+mapfile -t AUTH_LINES <<< "$AUTH_CREDENTIALS"
+
+if [[ "${#AUTH_LINES[@]}" -ne 2 || -z "${AUTH_LINES[0]}" || -z "${AUTH_LINES[1]}" ]]; then
+    echo "ERROR: Could not generate temporary CI authentication credentials."
+    exit 1
+fi
+
+export PULSECHECK_ADMIN_USERNAME="ci-admin"
+export PULSECHECK_ADMIN_PASSWORD_HASH="${AUTH_LINES[1]}"
+export PULSECHECK_E2E_ADMIN_PASSWORD="${AUTH_LINES[0]}"
+
+unset AUTH_CREDENTIALS AUTH_LINES
+
 export PULSECHECK_TEST_SUBNET="172.30.${SELECTED_OCTET}.0/24"
 export PULSECHECK_TEST_APP_IP="172.30.${SELECTED_OCTET}.2"
 export PULSECHECK_TEST_SIMULATOR_IP="172.30.${SELECTED_OCTET}.10"
@@ -85,8 +106,9 @@ fi
 
 echo "===== RUNNING UP -> DOWN -> UP TEST ====="
 
-if ! "${COMPOSE[@]}" exec -T pulsecheck \
-    python /app/integration_test.py; then
+if ! "${COMPOSE[@]}" exec -T \
+    -e "PULSECHECK_E2E_ADMIN_PASSWORD=${PULSECHECK_E2E_ADMIN_PASSWORD}" \
+    pulsecheck python /app/integration_test.py; then
 
     echo "===== INTEGRATION TEST FAILURE LOGS ====="
     "${COMPOSE[@]}" ps || true

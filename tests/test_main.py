@@ -3,19 +3,45 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import hash_password
 from app.main import app
 from app.monitoring import CheckResult, MonitoringService
 
 
+TEST_ADMIN_USERNAME = "test-admin"
+TEST_ADMIN_PASSWORD = "Correct-Test-Password-2026!"
+
+
 @pytest.fixture
-def client(tmp_path, monkeypatch):
+def anonymous_client(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "PULSECHECK_DB_PATH",
         str(tmp_path / "pulsecheck-test.db"),
     )
+    monkeypatch.setenv("PULSECHECK_ADMIN_USERNAME", TEST_ADMIN_USERNAME)
+    monkeypatch.setenv(
+        "PULSECHECK_ADMIN_PASSWORD_HASH",
+        hash_password(TEST_ADMIN_PASSWORD),
+    )
+    monkeypatch.setenv("PULSECHECK_COOKIE_SECURE", "false")
 
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def client(anonymous_client):
+    response = anonymous_client.post(
+        "/api/auth/login",
+        json={
+            "username": TEST_ADMIN_USERNAME,
+            "password": TEST_ADMIN_PASSWORD,
+        },
+    )
+    assert response.status_code == 200
+
+    anonymous_client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+    return anonymous_client
 
 
 def test_home(client):
@@ -261,6 +287,12 @@ def test_target_and_history_survive_application_restart(
         "PULSECHECK_DB_PATH",
         str(database_path),
     )
+    monkeypatch.setenv("PULSECHECK_ADMIN_USERNAME", TEST_ADMIN_USERNAME)
+    monkeypatch.setenv(
+        "PULSECHECK_ADMIN_PASSWORD_HASH",
+        hash_password(TEST_ADMIN_PASSWORD),
+    )
+    monkeypatch.setenv("PULSECHECK_COOKIE_SECURE", "false")
 
     async def fake_check_target(service, target_id):
         target = next(
@@ -290,7 +322,20 @@ def test_target_and_history_survive_application_restart(
         fake_check_target,
     )
 
+    def authenticate(test_client):
+        response = test_client.post(
+            "/api/auth/login",
+            json={
+                "username": TEST_ADMIN_USERNAME,
+                "password": TEST_ADMIN_PASSWORD,
+            },
+        )
+        assert response.status_code == 200
+        test_client.headers["X-CSRF-Token"] = response.json()["csrf_token"]
+
     with TestClient(app) as first_client:
+        authenticate(first_client)
+
         created = first_client.post(
             "/api/targets",
             json={
@@ -311,6 +356,8 @@ def test_target_and_history_survive_application_restart(
 
     # Simulate application shutdown and a fresh startup.
     with TestClient(app) as second_client:
+        authenticate(second_client)
+
         targets_response = second_client.get("/api/targets")
 
         assert targets_response.status_code == 200
@@ -388,3 +435,73 @@ def test_monitored_target_metrics_exposed(client, monkeypatch):
     assert "pulsecheck_monitored_target_consecutive_failures" in metrics
     assert "pulsecheck_monitored_target_last_check_timestamp_seconds" in metrics
     assert 'target_name="Metrics Test"' in metrics
+
+
+def test_anonymous_access_is_rejected(anonymous_client):
+    dashboard = anonymous_client.get("/", follow_redirects=False)
+    assert dashboard.status_code == 303
+    assert dashboard.headers["location"] == "/login"
+
+    api = anonymous_client.get("/api/targets")
+    assert api.status_code == 401
+
+
+def test_login_csrf_and_logout_lifecycle(anonymous_client):
+    invalid = anonymous_client.post(
+        "/api/auth/login",
+        json={
+            "username": TEST_ADMIN_USERNAME,
+            "password": "Wrong-Test-Password-2026!",
+        },
+    )
+    assert invalid.status_code == 401
+
+    login = anonymous_client.post(
+        "/api/auth/login",
+        json={
+            "username": TEST_ADMIN_USERNAME,
+            "password": TEST_ADMIN_PASSWORD,
+        },
+    )
+    assert login.status_code == 200
+    assert login.json()["authenticated"] is True
+
+    cookie = login.cookies.get("pulsecheck_session")
+    assert cookie
+
+    cookie_header = login.headers["set-cookie"].lower()
+    assert "httponly" in cookie_header
+    assert "samesite=lax" in cookie_header
+
+    csrf_token = login.json()["csrf_token"]
+
+    session = anonymous_client.get("/api/auth/session")
+    assert session.status_code == 200
+    assert session.json()["csrf_token"] == csrf_token
+
+    payload = {
+        "name": "Authenticated Test Monitor",
+        "url": "https://example.com/health",
+    }
+
+    denied = anonymous_client.post("/api/targets", json=payload)
+    assert denied.status_code == 403
+
+    anonymous_client.headers["X-CSRF-Token"] = csrf_token
+
+    created = anonymous_client.post("/api/targets", json=payload)
+    assert created.status_code == 201
+
+    anonymous_client.headers.pop("X-CSRF-Token", None)
+
+    denied_logout = anonymous_client.post("/api/auth/logout")
+    assert denied_logout.status_code == 403
+
+    logout = anonymous_client.post(
+        "/api/auth/logout",
+        headers={"X-CSRF-Token": csrf_token},
+    )
+    assert logout.status_code == 200
+
+    protected = anonymous_client.get("/api/targets")
+    assert protected.status_code == 401

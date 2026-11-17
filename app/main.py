@@ -4,10 +4,12 @@ import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from hmac import compare_digest
 from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import (
@@ -18,6 +20,16 @@ from prometheus_client import (
     generate_latest,
 )
 
+from app.auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_SECONDS,
+    generate_csrf_token,
+    generate_session_token,
+    hash_password,
+    hash_session_token,
+    verify_password,
+)
+from app.auth_middleware import AuthenticationMiddleware
 from app.database import Database
 from app.monitoring import MonitoringService
 from app.notifications import WebhookNotifier
@@ -248,6 +260,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(AuthenticationMiddleware)
+
 app.mount(
     "/static",
     StaticFiles(directory=APP_DIR / "static"),
@@ -289,6 +303,124 @@ async def collect_request_metrics(request: Request, call_next):
 @app.get("/", include_in_schema=False)
 async def home():
     return FileResponse(APP_DIR / "templates" / "index.html")
+
+
+
+@app.get("/login", include_in_schema=False)
+async def login_page():
+    return FileResponse(APP_DIR / "templates" / "login.html")
+
+
+@app.post("/api/auth/login")
+async def login(request: Request):
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid login request.") from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid login request.")
+
+    username = payload.get("username")
+    password = payload.get("password")
+
+    expected_username = os.getenv("PULSECHECK_ADMIN_USERNAME", "")
+    expected_hash = os.getenv("PULSECHECK_ADMIN_PASSWORD_HASH", "")
+
+    if not expected_username or not expected_hash:
+        raise HTTPException(
+            status_code=503,
+            detail="Administrator authentication is not configured.",
+        )
+
+    if not isinstance(username, str) or not isinstance(password, str):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    password_valid = verify_password(password, expected_hash)
+    username_valid = compare_digest(username, expected_username)
+
+    if not (username_valid and password_valid):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    database = request.app.state.database
+
+    old_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if old_token:
+        database.delete_session(hash_session_token(old_token))
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=SESSION_TTL_SECONDS)
+
+    token = generate_session_token()
+    token_hash = hash_session_token(token)
+    csrf_token = generate_csrf_token()
+
+    database.delete_expired_sessions(now.isoformat())
+    database.create_session(
+        token_hash=token_hash,
+        username=expected_username,
+        csrf_token=csrf_token,
+        created_at=now.isoformat(),
+        expires_at=expires_at.isoformat(),
+    )
+
+    secure_cookie = (
+        os.getenv("PULSECHECK_COOKIE_SECURE", "true").strip().lower()
+        == "true"
+    )
+
+    response = JSONResponse({
+        "authenticated": True,
+        "username": expected_username,
+        "csrf_token": csrf_token,
+    })
+
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+        path="/",
+    )
+
+    return response
+
+
+@app.get("/api/auth/session")
+async def get_auth_session(request: Request):
+    session = request.state.auth_session
+
+    return {
+        "authenticated": True,
+        "username": session["username"],
+        "csrf_token": session["csrf_token"],
+    }
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    session = request.state.auth_session
+    database = request.app.state.database
+
+    database.delete_session(session["token_hash"])
+
+    secure_cookie = (
+        os.getenv("PULSECHECK_COOKIE_SECURE", "true").strip().lower()
+        == "true"
+    )
+
+    response = JSONResponse({"authenticated": False})
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+    )
+
+    return response
 
 
 @app.get("/health")
