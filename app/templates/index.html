@@ -23,6 +23,7 @@
             <nav>
                 <a class="nav-link active" href="#overview">◫ &nbsp; Overview</a>
                 <a class="nav-link" href="#monitors">◉ &nbsp; Monitors</a>
+                <a class="nav-link" href="#incidents">⚠ &nbsp; Incidents</a>
             </nav>
 
             <div class="sidebar-bottom">
@@ -109,6 +110,72 @@
                 </div>
 
                 <div class="error-message" id="error-message" hidden></div>
+            </section>
+
+            <section class="panel incidents-panel" id="incidents">
+                <div class="panel-header incidents-header">
+                    <div>
+                        <h2>Incidents</h2>
+                        <p>Monitor outages and recovery history.</p>
+                    </div>
+                    <div class="incident-filters" role="group" aria-label="Filter incidents">
+                        <button class="action-button active" data-incident-filter="all">All</button>
+                        <button class="action-button" data-incident-filter="active">Active</button>
+                        <button class="action-button" data-incident-filter="resolved">Resolved</button>
+                    </div>
+                </div>
+
+                <div class="incident-summary-grid">
+                    <article class="stat-card">
+                        <div class="stat-label">Active incidents</div>
+                        <div class="stat-value red" id="incident-stat-active">—</div>
+                        <div class="stat-note">Currently unresolved</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Resolved incidents</div>
+                        <div class="stat-value green" id="incident-stat-resolved">—</div>
+                        <div class="stat-note">Recovered applications</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Total incidents</div>
+                        <div class="stat-value" id="incident-stat-total">—</div>
+                        <div class="stat-note">Recorded incident history</div>
+                    </article>
+                </div>
+
+                <div class="panel-header">
+                    <div>
+                        <h2>Incident history</h2>
+                        <p>Most recent incidents first.</p>
+                    </div>
+                    <span class="count-label" id="incidents-count">Loading...</span>
+                </div>
+
+                <div class="table-wrap">
+                    <table class="incidents-table">
+                        <thead>
+                            <tr>
+                                <th>MONITOR</th>
+                                <th>STATUS</th>
+                                <th>STARTED</th>
+                                <th>RESOLVED</th>
+                                <th>DURATION</th>
+                                <th>HTTP</th>
+                                <th>FAILURES</th>
+                                <th>DETAIL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="incidents-body"></tbody>
+                    </table>
+                </div>
+
+                <div class="empty-state" id="incidents-empty" hidden>
+                    <div class="empty-icon">✓</div>
+                    <h3>No incidents found</h3>
+                    <p>There are no incidents matching this filter.</p>
+                </div>
+
+                <div class="error-message" id="incidents-error" hidden></div>
             </section>
 
             <section class="panel history-panel" id="history-panel" hidden>

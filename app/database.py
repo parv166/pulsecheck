@@ -66,6 +66,30 @@ class Database:
                     idx_monitoring_history_target_checked
                 ON monitoring_history(target_id, checked_at DESC);
 
+                CREATE TABLE IF NOT EXISTS incidents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    target_url TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK(status IN ('ACTIVE', 'RESOLVED')),
+                    started_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    status_code INTEGER,
+                    latency_ms REAL NOT NULL,
+                    consecutive_failures INTEGER NOT NULL,
+                    error TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS
+                    idx_incidents_status_started
+                ON incidents(status, started_at DESC);
+
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_incidents_one_active_per_target
+                ON incidents(target_id)
+                WHERE status = 'ACTIVE';
+
                 CREATE TABLE IF NOT EXISTS auth_sessions (
                     token_hash TEXT PRIMARY KEY,
                     username TEXT NOT NULL,
@@ -142,6 +166,9 @@ class Database:
         self.save_results([result])
 
     def save_results(self, results: list[CheckResult]) -> None:
+        if not results:
+            return
+
         records = [
             (
                 result.target_id,
@@ -160,26 +187,92 @@ class Database:
             for result in results
         ]
 
-        if not records:
-            return
-
         with self._connection() as connection:
             connection.executemany(
                 """
                 INSERT INTO monitoring_history (
-                    target_id,
-                    status,
-                    status_code,
-                    latency_ms,
-                    checked_at,
-                    consecutive_failures,
-                    last_success_at,
-                    error
+                    target_id, status, status_code, latency_ms,
+                    checked_at, consecutive_failures,
+                    last_success_at, error
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 records,
             )
+
+            # Maintain incident state on every persisted observation.
+            for result in results:
+                checked_at = result.checked_at.isoformat()
+
+                active = connection.execute(
+                    """
+                    SELECT id FROM incidents
+                    WHERE target_id = ? AND status = 'ACTIVE'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (result.target_id,),
+                ).fetchone()
+
+                if result.status == "DOWN":
+                    if active is None:
+                        connection.execute(
+                            """
+                            INSERT INTO incidents (
+                                target_id, target_name, target_url,
+                                status, started_at, status_code,
+                                latency_ms, consecutive_failures, error
+                            )
+                            VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                result.target_id,
+                                result.name,
+                                result.url,
+                                checked_at,
+                                result.status_code,
+                                result.latency_ms,
+                                result.consecutive_failures,
+                                result.error,
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            UPDATE incidents
+                            SET status_code = ?,
+                                latency_ms = ?,
+                                consecutive_failures = ?,
+                                error = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                result.status_code,
+                                result.latency_ms,
+                                result.consecutive_failures,
+                                result.error,
+                                active["id"],
+                            ),
+                        )
+
+                elif result.status == "UP" and active is not None:
+                    connection.execute(
+                        """
+                        UPDATE incidents
+                        SET status = 'RESOLVED',
+                            resolved_at = ?,
+                            status_code = ?,
+                            latency_ms = ?,
+                            consecutive_failures = 0,
+                            error = NULL
+                        WHERE id = ?
+                        """,
+                        (
+                            checked_at,
+                            result.status_code,
+                            result.latency_ms,
+                            active["id"],
+                        ),
+                    )
 
     @staticmethod
     def _row_to_result(row: sqlite3.Row) -> CheckResult:
@@ -253,6 +346,65 @@ class Database:
 
         return [self._row_to_result(row) for row in rows]
 
+
+    def list_incidents(
+        self,
+        status: str = "all",
+        limit: int = 100,
+    ) -> list[dict]:
+        if status not in {"all", "active", "resolved"}:
+            raise ValueError("Invalid incident status.")
+
+        if not 1 <= limit <= 200:
+            raise ValueError("Incident limit must be between 1 and 200.")
+
+        filter_status = {
+            "active": "ACTIVE",
+            "resolved": "RESOLVED",
+        }.get(status)
+
+        with self._connection() as connection:
+            if filter_status:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM incidents
+                    WHERE status = ?
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (filter_status, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM incidents
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def get_incident_summary(self) -> dict[str, int]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM incidents
+                GROUP BY status
+                """
+            ).fetchall()
+
+        counts = {row["status"]: row["count"] for row in rows}
+        active = counts.get("ACTIVE", 0)
+        resolved = counts.get("RESOLVED", 0)
+
+        return {
+            "active": active,
+            "resolved": resolved,
+            "total": active + resolved,
+        }
 
     def create_session(
         self,

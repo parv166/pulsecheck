@@ -1,5 +1,5 @@
 const API = "/api/targets";
-const state = { targets: [], historyTarget: null, csrfToken: null };
+const state = { targets: [], historyTarget: null, csrfToken: null, incidentsFilter: "all" };
 
 const $ = (id) => document.getElementById(id);
 
@@ -240,6 +240,96 @@ function renderTargets() {
     }).join("");
 }
 
+
+function formatDuration(startedAt, resolvedAt) {
+    const start = new Date(startedAt);
+    const end = resolvedAt ? new Date(resolvedAt) : new Date();
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        return "Unknown";
+    }
+
+    const totalMinutes = Math.max(0, Math.floor((end - start) / 60000));
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+
+    if (days) return `${days}d ${hours}h`;
+    if (hours) return `${hours}h ${minutes}m`;
+    return `${minutes}m`;
+}
+
+function renderIncidents(records) {
+    const body = $("incidents-body");
+    const empty = $("incidents-empty");
+    const error = $("incidents-error");
+
+    body.innerHTML = "";
+    error.hidden = true;
+    $("incidents-count").textContent =
+        `${records.length} incident${records.length === 1 ? "" : "s"}`;
+
+    if (!records.length) {
+        empty.hidden = false;
+        return;
+    }
+
+    empty.hidden = true;
+
+    body.innerHTML = records.map(incident => {
+        const active = incident.status === "ACTIVE";
+        const status = active ? "ACTIVE" : "RESOLVED";
+        const statusClass = active ? "down" : "up";
+        const detail = incident.error || "No error details recorded";
+
+        return `
+            <tr>
+                <td>
+                    <span class="app-name">${escapeHTML(incident.target_name)}</span>
+                    <span class="app-url">${escapeHTML(incident.target_url)}</span>
+                </td>
+                <td>
+                    <span class="status-pill status-${statusClass}">● ${status}</span>
+                </td>
+                <td>${escapeHTML(formatDate(incident.started_at))}</td>
+                <td>${escapeHTML(incident.resolved_at ? formatDate(incident.resolved_at) : "—")}</td>
+                <td>${escapeHTML(formatDuration(incident.started_at, incident.resolved_at))}</td>
+                <td>${escapeHTML(incident.status_code ?? "—")}</td>
+                <td>${escapeHTML(incident.consecutive_failures ?? "—")}</td>
+                <td>
+                    <span class="incident-detail" title="${escapeHTML(detail)}">
+                        ${escapeHTML(detail)}
+                    </span>
+                </td>
+            </tr>
+        `;
+    }).join("");
+}
+
+async function loadIncidents() {
+    try {
+        const [summary, data] = await Promise.all([
+            requestJSON("/api/incidents/summary"),
+            requestJSON(
+                `/api/incidents?status=${encodeURIComponent(state.incidentsFilter)}&limit=100`
+            )
+        ]);
+
+        $("incident-stat-active").textContent = summary.active ?? 0;
+        $("incident-stat-resolved").textContent = summary.resolved ?? 0;
+        $("incident-stat-total").textContent = summary.total ?? 0;
+
+        renderIncidents(data.incidents || []);
+        return true;
+    } catch (error) {
+        $("incidents-error").textContent =
+            `Could not load incidents: ${error.message}`;
+        $("incidents-error").hidden = false;
+        $("incidents-count").textContent = "Unavailable";
+        return false;
+    }
+}
+
 async function refreshVisibleHistory() {
     const id = state.historyTarget;
 
@@ -358,7 +448,7 @@ async function manualCheck(id, button) {
             method: "POST"
         });
         showToast(`Check completed: ${result.status}`);
-        await loadTargets();
+        await Promise.all([loadTargets(), loadIncidents()]);
     } catch (error) {
         showToast(error.message);
     } finally {
@@ -442,6 +532,26 @@ document.addEventListener("click", async (event) => {
     if (action === "delete") await deleteTarget(id);
 });
 
+document.addEventListener("click", event => {
+    const filterButton = event.target.closest("[data-incident-filter]");
+    if (filterButton) {
+        state.incidentsFilter = filterButton.dataset.incidentFilter;
+
+        document.querySelectorAll("[data-incident-filter]").forEach(button => {
+            button.classList.toggle("active", button === filterButton);
+        });
+
+        loadIncidents();
+    }
+
+    const navLink = event.target.closest(".nav-link");
+    if (navLink) {
+        document.querySelectorAll(".nav-link").forEach(link => {
+            link.classList.toggle("active", link === navLink);
+        });
+    }
+});
+
 $("open-add-dialog").addEventListener("click", () => $("add-dialog").showModal());
 $("empty-add-button").addEventListener("click", () => $("add-dialog").showModal());
 $("close-dialog").addEventListener("click", () => $("add-dialog").close());
@@ -470,7 +580,7 @@ async function initialize() {
         const session = await requestJSON("/api/auth/session");
         state.csrfToken = session.csrf_token;
 
-        await Promise.all([loadTargets(), checkEngine()]);
+        await Promise.all([loadTargets(), checkEngine(), loadIncidents()]);
 
         try {
             const version = await requestJSON("/version");
@@ -479,7 +589,10 @@ async function initialize() {
             $("app-version").textContent = "";
         }
 
-        window.setInterval(loadTargets, 10000);
+        window.setInterval(() => {
+            loadTargets();
+            loadIncidents();
+        }, 10000);
     } catch (error) {
         console.error("Dashboard initialization failed:", error);
     }

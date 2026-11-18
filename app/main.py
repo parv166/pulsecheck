@@ -439,6 +439,38 @@ async def version():
     }
 
 
+@app.get("/api/incidents")
+async def list_incidents(
+    request: Request,
+    status: str = Query(default="all"),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    database = request.app.state.database
+
+    try:
+        incidents = await asyncio.to_thread(
+            database.list_incidents,
+            status,
+            limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {
+        "incidents": incidents,
+        "count": len(incidents),
+    }
+
+
+@app.get("/api/incidents/summary")
+async def incident_summary(request: Request):
+    database = request.app.state.database
+
+    return await asyncio.to_thread(
+        database.get_incident_summary
+    )
+
+
 @app.get("/api/demo")
 async def demo():
     return {
