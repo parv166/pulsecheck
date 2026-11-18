@@ -34,6 +34,7 @@ from app.database import Database
 from app.monitoring import MonitoringService
 from app.notifications import WebhookNotifier
 from app.scheduler import run_monitoring_scheduler
+from app.server_metrics import load_server_metrics
 
 
 APP_NAME = "PulseCheck"
@@ -469,6 +470,11 @@ async def incident_summary(request: Request):
     return await asyncio.to_thread(
         database.get_incident_summary
     )
+
+
+@app.get("/api/servers")
+async def server_metrics():
+    return await asyncio.to_thread(load_server_metrics)
 
 
 @app.get("/api/demo")

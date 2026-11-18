@@ -1,0 +1,36 @@
+[Unit]
+Description=PulseCheck EC2 and CloudWatch metrics collector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pulsecheck-metrics
+Group=pulsecheck-metrics
+EnvironmentFile=/etc/pulsecheck-metrics.conf
+Environment=AWS_PAGER=
+WorkingDirectory=/var/lib/pulsecheck-metrics
+ExecStart=/usr/bin/python3 /usr/local/libexec/pulsecheck/collect_ec2_metrics.py
+TimeoutStartSec=90
+UMask=0022
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/pulsecheck-metrics
+
+[Install]
+WantedBy=multi-user.target

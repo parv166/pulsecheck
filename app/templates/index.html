@@ -23,6 +23,7 @@
             <nav>
                 <a class="nav-link active" href="#overview">◫ &nbsp; Overview</a>
                 <a class="nav-link" href="#monitors">◉ &nbsp; Monitors</a>
+                <a class="nav-link" href="#servers">▣ &nbsp; Servers</a>
                 <a class="nav-link" href="#incidents">⚠ &nbsp; Incidents</a>
             </nav>
 
@@ -110,6 +111,90 @@
                 </div>
 
                 <div class="error-message" id="error-message" hidden></div>
+            </section>
+
+            <section class="panel servers-panel" id="servers">
+                <div class="panel-header">
+                    <div>
+                        <h2>AWS Servers</h2>
+                        <p>EC2 instance health and CloudWatch performance metrics.</p>
+                    </div>
+                    <span id="servers-health" class="server-health-pill unknown">Loading...</span>
+                </div>
+
+                <div class="server-summary-grid">
+                    <article class="stat-card">
+                        <div class="stat-label">Instance state</div>
+                        <div class="stat-value" id="server-state">—</div>
+                        <div class="stat-note" id="server-instance-id">Instance ID unavailable</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">CPU utilization</div>
+                        <div class="stat-value" id="server-cpu">—</div>
+                        <div class="stat-note" id="server-cpu-time">Latest 5-minute average</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Network in</div>
+                        <div class="stat-value" id="server-network-in">—</div>
+                        <div class="stat-note" id="server-network-in-time">Latest 5-minute total</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Network out</div>
+                        <div class="stat-value" id="server-network-out">—</div>
+                        <div class="stat-note" id="server-network-out-time">Latest 5-minute total</div>
+                    </article>
+                </div>
+
+                <div class="panel-header server-details-heading">
+                    <div>
+                        <h2>Instance details</h2>
+                        <p>Infrastructure information and EC2 status checks.</p>
+                    </div>
+                    <span class="count-label" id="server-age">Waiting for data</span>
+                </div>
+
+                <div class="server-details-grid">
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Instance type</div>
+                        <div class="server-detail-value" id="server-instance-type">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Availability zone</div>
+                        <div class="server-detail-value" id="server-az">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">System status</div>
+                        <div class="server-detail-value" id="server-system-status">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Instance status</div>
+                        <div class="server-detail-value" id="server-instance-status">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">AWS region</div>
+                        <div class="server-detail-value" id="server-region">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Launch time</div>
+                        <div class="server-detail-value" id="server-launch-time">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Last collected</div>
+                        <div class="server-detail-value" id="server-collected">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Data freshness</div>
+                        <div class="server-detail-value" id="server-freshness">—</div>
+                    </div>
+                </div>
+
+                <div class="server-notice" id="servers-warning" hidden></div>
+                <div class="empty-state" id="servers-unavailable" hidden>
+                    <div class="empty-icon">▣</div>
+                    <h3>Server metrics unavailable</h3>
+                    <p id="servers-unavailable-message">Waiting for the first metrics collection.</p>
+                </div>
+                <div class="error-message" id="servers-error" hidden></div>
             </section>
 
             <section class="panel incidents-panel" id="incidents">

@@ -377,19 +377,38 @@ print("PASS: SQLite database exists and is accessible")
 
                         echo "Deploying build ${BUILD_NUMBER} to EC2..."
 
-                        ssh \
-                          -i "$EC2_SSH_KEY" \
-                          -o BatchMode=yes \
-                          -o IdentitiesOnly=yes \
-                          -o StrictHostKeyChecking=yes \
-                          -o UserKnownHostsFile="$EC2_KNOWN_HOSTS" \
-                          -o ConnectTimeout=15 \
+                        REMOTE_ASSET_DIR="/tmp/pulsecheck-metrics-${BUILD_NUMBER}"
+                        SSH_OPTIONS=(
+                          -i "$EC2_SSH_KEY"
+                          -o BatchMode=yes
+                          -o IdentitiesOnly=yes
+                          -o StrictHostKeyChecking=yes
+                          -o UserKnownHostsFile="$EC2_KNOWN_HOSTS"
+                          -o ConnectTimeout=15
+                        )
+
+                        echo "Transferring metrics collector assets to EC2..."
+
+                        tar -cf - \
+                          -C "$WORKSPACE/scripts" collect_ec2_metrics.py install_ec2_metrics.sh validate_metrics_snapshot.py \
+                          -C "$WORKSPACE/deploy/systemd" pulsecheck-metrics.service pulsecheck-metrics.timer \
+                          | ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
+                              "mkdir -p '$REMOTE_ASSET_DIR' && tar -xf - -C '$REMOTE_ASSET_DIR'"
+
+                        ssh "${SSH_OPTIONS[@]}" \
                           "$EC2_SSH_USER@$EC2_HOST" \
                           "bash -s -- '${BUILD_NUMBER}'" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 BUILD_TAG="$1"
 AWS_REGION="ap-south-1"
+
+if [[ ! "$BUILD_TAG" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: Invalid Jenkins build number."
+    exit 1
+fi
+
+REMOTE_ASSET_DIR="/tmp/pulsecheck-metrics-${BUILD_TAG}"
 
 APP_CONTAINER="pulsecheck-app"
 PREVIOUS_CONTAINER="pulsecheck-app-previous"
@@ -465,6 +484,40 @@ wait_for_app() {
     done
 
     return 1
+}
+
+
+verify_metrics_mount() {
+    local container="$1"
+    local mount_rw
+
+    mount_rw=$(sudo docker inspect \
+      --format '{{range .Mounts}}{{if eq .Destination "/run/pulsecheck-metrics"}}{{.RW}}{{end}}{{end}}' \
+      "$container")
+
+    if [ "$mount_rw" != "false" ]; then
+        echo "ERROR: Metrics snapshot mount is missing or writable in $container."
+        return 1
+    fi
+
+    sudo docker exec "$container" /app/venv/bin/python -c '
+import json
+import os
+from pathlib import Path
+
+assert os.geteuid() == 65532, "Unexpected application UID"
+
+path = Path("/run/pulsecheck-metrics/metrics.json")
+assert path.is_file(), "Metrics snapshot is missing"
+
+with path.open(encoding="utf-8") as handle:
+    snapshot = json.load(handle)
+
+assert snapshot.get("schema_version") == 1
+
+print("PASS: Metrics snapshot readable by application UID 65532.")
+print("PASS: Snapshot schema verified.")
+'
 }
 
 rollback_and_cleanup() {
@@ -744,6 +797,12 @@ print("Initial DHI data volume permissions prepared.")
 '
 fi
 
+echo "===== INSTALLING EC2 METRICS COLLECTOR ====="
+
+bash "$REMOTE_ASSET_DIR/install_ec2_metrics.sh" "$BUILD_TAG"
+
+sudo test -s /var/lib/pulsecheck-metrics/metrics.json
+
 echo "===== TESTING DHI CANDIDATE ====="
 
 sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
@@ -756,6 +815,7 @@ sudo docker run -d \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
   --pids-limit=100 \
   --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
+  --mount "type=bind,source=/var/lib/pulsecheck-metrics,target=/run/pulsecheck-metrics,readonly" \
   -p "127.0.0.1:${CANDIDATE_PORT}:8000" \
   -e APP_VERSION="$BUILD_TAG" \
   -e PULSECHECK_DB_PATH=/app/data/pulsecheck.db \
@@ -766,6 +826,9 @@ if ! wait_for_app "$CANDIDATE_PORT"; then
     sudo docker logs "$CANDIDATE_CONTAINER" || true
     exit 1
 fi
+
+echo "===== VERIFYING CANDIDATE METRICS MOUNT ====="
+verify_metrics_mount "$CANDIDATE_CONTAINER"
 
 echo "===== VERIFYING CANDIDATE DATABASE ====="
 
@@ -856,6 +919,7 @@ sudo docker run -d \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
   --pids-limit=100 \
   --mount "type=volume,source=$CANDIDATE_VOLUME,target=/app/data" \
+  --mount "type=bind,source=/var/lib/pulsecheck-metrics,target=/run/pulsecheck-metrics,readonly" \
   -p 127.0.0.1:8000:8000 \
   --env-file "$SECRET_ENV_FILE" \
   -e APP_VERSION="$BUILD_TAG" \
@@ -869,6 +933,9 @@ if ! wait_for_app 8000; then
     sudo docker logs "$APP_CONTAINER" || true
     exit 1
 fi
+
+echo "===== VERIFYING PRODUCTION METRICS MOUNT ====="
+verify_metrics_mount "$APP_CONTAINER"
 
 sudo docker exec "$APP_CONTAINER" \
   /app/venv/bin/python -c '

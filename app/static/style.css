@@ -470,3 +470,120 @@ tbody tr:last-child td { border-bottom: 0; }
         width: 100%;
     }
 }
+
+
+/* AWS Servers workspace */
+.servers-panel {
+    scroll-margin-top: 24px;
+}
+
+.server-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    padding: 0 20px 20px;
+}
+
+.server-summary-grid .stat-card {
+    min-width: 0;
+}
+
+.server-details-heading {
+    border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.server-details-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    padding: 0 20px 20px;
+}
+
+.server-detail-card {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.035);
+}
+
+.server-detail-label {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.server-detail-value {
+    margin-top: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.server-health-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 11px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    background: rgba(148, 163, 184, 0.10);
+    color: var(--muted);
+}
+
+.server-health-pill.good {
+    color: #36c98f;
+    background: rgba(54, 201, 143, 0.12);
+}
+
+.server-health-pill.warning {
+    color: #e5ae48;
+    background: rgba(229, 174, 72, 0.12);
+}
+
+.server-health-pill.bad {
+    color: #f07878;
+    background: rgba(240, 120, 120, 0.12);
+}
+
+.server-health-pill.unknown {
+    color: var(--muted);
+}
+
+.server-notice {
+    margin: 0 20px 18px;
+    padding: 12px 14px;
+    border: 1px solid rgba(229, 174, 72, 0.25);
+    border-radius: 9px;
+    color: #e5ae48;
+    background: rgba(229, 174, 72, 0.07);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+@media (max-width: 1000px) {
+    .server-summary-grid,
+    .server-details-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 600px) {
+    .server-summary-grid,
+    .server-details-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 9px;
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+
+    .server-detail-card {
+        padding: 11px;
+    }
+
+    .server-health-pill {
+        font-size: 10px;
+    }
+}

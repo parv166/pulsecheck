@@ -383,6 +383,172 @@ async function refreshVisibleHistory() {
     }
 }
 
+
+function formatMetric(value, suffix = "") {
+    return typeof value === "number" && Number.isFinite(value)
+        ? `${value.toFixed(1)}${suffix}`
+        : "—";
+}
+
+function formatBytes(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+
+    const units = ["B", "KiB", "MiB", "GiB"];
+    let amount = Math.max(0, value);
+    let index = 0;
+
+    while (amount >= 1024 && index < units.length - 1) {
+        amount /= 1024;
+        index++;
+    }
+
+    return `${amount.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+}
+
+function formatCollectionAge(seconds) {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+        return "Unknown";
+    }
+
+    if (seconds < 60) return `${seconds}s ago`;
+
+    const minutes = Math.floor(seconds / 60);
+    const remainder = seconds % 60;
+
+    if (minutes < 60) return `${minutes}m ${remainder}s ago`;
+
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m ago`;
+}
+
+function renderServers(result) {
+    const health = $("servers-health");
+    const warning = $("servers-warning");
+    const unavailable = $("servers-unavailable");
+
+    warning.hidden = true;
+    unavailable.hidden = true;
+    $("servers-error").hidden = true;
+
+    if (!result.available || !result.snapshot) {
+        health.textContent = "Unavailable";
+        health.className = "server-health-pill unknown";
+
+        unavailable.hidden = false;
+        $("servers-unavailable-message").textContent =
+            result.error || "The metrics snapshot is not available.";
+
+        [
+            "server-state", "server-instance-id", "server-cpu",
+            "server-network-in", "server-network-out",
+            "server-instance-type", "server-az", "server-system-status",
+            "server-instance-status", "server-region", "server-launch-time",
+            "server-collected", "server-freshness", "server-age",
+            "server-cpu-time", "server-network-in-time",
+            "server-network-out-time"
+        ].forEach(id => $(id).textContent = "—");
+
+        return;
+    }
+
+    const snapshot = result.snapshot;
+    const instance = snapshot.instance || {};
+    const metrics = snapshot.metrics || {};
+    const collection = snapshot.collection || {};
+
+    $("server-state").textContent = instance.state || "Unknown";
+    $("server-instance-id").textContent = instance.instance_id || "—";
+    $("server-instance-type").textContent = instance.instance_type || "—";
+    $("server-az").textContent = instance.availability_zone || "—";
+    $("server-system-status").textContent = instance.system_status || "Unknown";
+    $("server-instance-status").textContent = instance.instance_status || "Unknown";
+    $("server-region").textContent = snapshot.region || "—";
+    $("server-launch-time").textContent = formatDate(instance.launch_time);
+    $("server-collected").textContent = formatDate(snapshot.collected_at);
+    $("server-freshness").textContent = formatCollectionAge(result.age_seconds);
+    $("server-age").textContent = formatCollectionAge(result.age_seconds);
+
+    const cpu = metrics.cpu_utilization || {};
+    const networkIn = metrics.network_in_bytes || {};
+    const networkOut = metrics.network_out_bytes || {};
+
+    $("server-cpu").textContent = formatMetric(cpu.value, "%");
+    $("server-network-in").textContent = formatBytes(networkIn.value);
+    $("server-network-out").textContent = formatBytes(networkOut.value);
+
+    $("server-cpu-time").textContent =
+        cpu.timestamp ? `Sample: ${formatDate(cpu.timestamp)}` : "No recent datapoint";
+    $("server-network-in-time").textContent =
+        networkIn.timestamp ? `Sample: ${formatDate(networkIn.timestamp)}` : "No recent datapoint";
+    $("server-network-out-time").textContent =
+        networkOut.timestamp ? `Sample: ${formatDate(networkOut.timestamp)}` : "No recent datapoint";
+
+    const systemStatus = (instance.system_status || "").toLowerCase();
+    const instanceStatus = (instance.instance_status || "").toLowerCase();
+    const instanceState = (instance.state || "").toLowerCase();
+
+    let healthClass = "warning";
+    let healthLabel = "Check status";
+
+    if (instanceState !== "running" ||
+        systemStatus === "impaired" ||
+        instanceStatus === "impaired") {
+        healthClass = "bad";
+        healthLabel = "Degraded";
+    } else if (
+        !result.stale &&
+        instanceState === "running" &&
+        systemStatus === "ok" &&
+        instanceStatus === "ok" &&
+        collection.status === "ok"
+    ) {
+        healthClass = "good";
+        healthLabel = "Healthy";
+    } else if (result.stale) {
+        healthClass = "warning";
+        healthLabel = "Stale data";
+    }
+
+    health.textContent = healthLabel;
+    health.className = `server-health-pill ${healthClass}`;
+
+    const notices = [];
+
+    if (result.stale) {
+        notices.push(
+            `Snapshot is stale. Last collection was ${formatCollectionAge(result.age_seconds)}.`
+        );
+    }
+
+    if (collection.status && collection.status !== "ok") {
+        notices.push(`Collector status: ${collection.status}.`);
+    }
+
+    if (Array.isArray(collection.errors) && collection.errors.length) {
+        notices.push(collection.errors.join("; "));
+    }
+
+    if (notices.length) {
+        warning.textContent = notices.join(" ");
+        warning.hidden = false;
+    }
+}
+
+async function loadServers() {
+    try {
+        const result = await requestJSON("/api/servers");
+        renderServers(result);
+        return true;
+    } catch (error) {
+        $("servers-error").textContent =
+            `Could not load server metrics: ${error.message}`;
+        $("servers-error").hidden = false;
+        $("servers-health").textContent = "Unavailable";
+        $("servers-health").className = "server-health-pill unknown";
+        return false;
+    }
+}
+
 async function loadTargets() {
     try {
         const data = await requestJSON(API);
@@ -557,7 +723,11 @@ $("empty-add-button").addEventListener("click", () => $("add-dialog").showModal(
 $("close-dialog").addEventListener("click", () => $("add-dialog").close());
 $("cancel-dialog").addEventListener("click", () => $("add-dialog").close());
 $("add-form").addEventListener("submit", addTarget);
-$("refresh-button").addEventListener("click", loadTargets);
+$("refresh-button").addEventListener("click", () => {
+    loadTargets();
+    loadIncidents();
+    loadServers();
+});
 $("close-history").addEventListener("click", () => $("history-panel").hidden = true);
 
 $("logout-button").addEventListener("click", async () => {
@@ -580,7 +750,7 @@ async function initialize() {
         const session = await requestJSON("/api/auth/session");
         state.csrfToken = session.csrf_token;
 
-        await Promise.all([loadTargets(), checkEngine(), loadIncidents()]);
+        await Promise.all([loadTargets(), checkEngine(), loadIncidents(), loadServers()]);
 
         try {
             const version = await requestJSON("/version");
@@ -592,6 +762,7 @@ async function initialize() {
         window.setInterval(() => {
             loadTargets();
             loadIncidents();
+            loadServers();
         }, 10000);
     } catch (error) {
         console.error("Dashboard initialization failed:", error);
