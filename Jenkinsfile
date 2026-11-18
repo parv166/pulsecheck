@@ -433,7 +433,7 @@ if ! sudo grep -Eq '^PULSECHECK_ADMIN_USERNAME=[^[:space:]]+$' "$SECRET_ENV_FILE
     exit 1
 fi
 
-if ! sudo grep -Eq '^PULSECHECK_ADMIN_PASSWORD_HASH=scrypt-v1\$[0-9a-f]{32}\$[0-9a-f]{128}$' "$SECRET_ENV_FILE"; then
+if ! sudo grep -Eq '^PULSECHECK_ADMIN_PASSWORD_HASH=scrypt-v1[$][0-9a-f]{32}[$][0-9a-f]{128}$' "$SECRET_ENV_FILE"; then
     echo "ERROR: Production admin password hash is missing or invalid."
     exit 1
 fi
