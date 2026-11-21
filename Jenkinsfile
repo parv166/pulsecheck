@@ -284,9 +284,6 @@ print("PASS: SQLite database exists and is accessible")
         }
 
         stage('Deployment Rollback Regression Test') {
-            when {
-                expression { false }
-            }
             steps {
                 sh '''
                     set -eu

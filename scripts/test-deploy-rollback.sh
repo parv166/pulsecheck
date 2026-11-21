@@ -5,8 +5,8 @@ JENKINSFILE="${1:-Jenkinsfile}"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-# Extract the actual rollback function from the Jenkinsfile's remote script.
-python3 - "$JENKINSFILE" "$WORK_DIR/rollback-function.sh" <<'PY'
+# Extract the real health-check and rollback functions from Jenkinsfile.
+python3 - "$JENKINSFILE" "$WORK_DIR/rollback-functions.sh" <<'PY'
 from pathlib import Path
 import sys
 
@@ -18,34 +18,36 @@ if jenkinsfile.count(marker) != 1:
 
 start = jenkinsfile.index(marker) + len(marker)
 end = jenkinsfile.index("\nREMOTE_SCRIPT", start)
-remote = jenkinsfile[start:end]
+lines = jenkinsfile[start:end].splitlines()
 
-lines = remote.splitlines()
-function_start = next(
-    (i for i, line in enumerate(lines)
-     if line.strip() == "rollback_and_cleanup() {"),
-    None,
-)
+blocks = []
 
-if function_start is None:
-    raise SystemExit("rollback_and_cleanup() was not found.")
+for name in ("wait_for_app", "rollback_and_cleanup"):
+    function_start = next(
+        (i for i, line in enumerate(lines)
+         if line.strip() == f"{name}() {{"),
+        None,
+    )
 
-function_end = next(
-    (i for i in range(function_start + 1, len(lines))
-     if lines[i] == "}"),
-    None,
-)
+    if function_start is None:
+        raise SystemExit(f"{name}() was not found.")
 
-if function_end is None:
-    raise SystemExit("Could not find the end of rollback_and_cleanup().")
+    function_end = next(
+        (i for i in range(function_start + 1, len(lines))
+         if lines[i] == "}"),
+        None,
+    )
 
-Path(sys.argv[2]).write_text(
-    "\n".join(lines[function_start:function_end + 1]) + "\n"
-)
-print("Extracted actual rollback function from Jenkinsfile.")
+    if function_end is None:
+        raise SystemExit(f"Could not find the end of {name}().")
+
+    blocks.append("\n".join(lines[function_start:function_end + 1]))
+
+Path(sys.argv[2]).write_text("\n\n".join(blocks) + "\n")
+print("Extracted actual wait_for_app() and rollback_and_cleanup().")
 PY
 
-# Mock Docker. All state changes happen in temporary test files.
+# All Docker operations are mocked and operate only on temporary files.
 docker_mock() {
     printf 'docker %s\n' "$*" >> "$ACTION_LOG"
 
@@ -58,13 +60,16 @@ docker_mock() {
             shift
             [[ "${1:-}" == "-f" ]] && shift
             local target="${1:?missing container name}"
-            grep -Fvx -- "$target" "$STATE_FILE" > "$STATE_FILE.tmp" || true
+
+            grep -Fvx -- "$target" "$STATE_FILE" \
+                > "$STATE_FILE.tmp" || true
             mv "$STATE_FILE.tmp" "$STATE_FILE"
             ;;
 
         rename)
             local old="$2"
             local new="$3"
+
             awk -v old="$old" -v new="$new" '
                 $0 == old { print new; found=1; next }
                 { print }
@@ -73,12 +78,24 @@ docker_mock() {
                 mv "$STATE_FILE.tmp" "$STATE_FILE"
             ;;
 
-        start|stop|logs)
+        start)
+            grep -Fxq -- "$2" "$STATE_FILE"
+            ;;
+
+        stop|logs)
             return 0
             ;;
 
         volume)
-            return 0
+            if [[ "${2:-}" == "rm" ]]; then
+                local target="${3:?missing volume name}"
+                grep -Fvx -- "$target" "$VOLUME_STATE_FILE" \
+                    > "$VOLUME_STATE_FILE.tmp" || true
+                mv "$VOLUME_STATE_FILE.tmp" "$VOLUME_STATE_FILE"
+            else
+                echo "Unexpected mocked Docker volume operation: $*" >&2
+                return 99
+            fi
             ;;
 
         *)
@@ -93,6 +110,7 @@ sudo() {
         echo "Unexpected sudo command in test: $*" >&2
         return 99
     fi
+
     shift
     docker_mock "$@"
 }
@@ -100,42 +118,51 @@ sudo() {
 run_case() {
     local name="$1"
     local old_exists="$2"
-    local switch_started="$3"
-    local deployment_complete="$4"
-    local initial_containers="$5"
-    local expected_status="$6"
+    local old_stopped="$3"
+    local switch_started="$4"
+    local deployment_complete="$5"
+    local initial_containers="$6"
+    local expected_status="$7"
+    local curl_ok="$8"
 
     STATE_FILE="$WORK_DIR/$name.containers"
+    VOLUME_STATE_FILE="$WORK_DIR/$name.volumes"
     ACTION_LOG="$WORK_DIR/$name.actions"
+    CASE_OUTPUT="$WORK_DIR/$name.output"
 
     printf '%s\n' "$initial_containers" > "$STATE_FILE"
+    printf '%s\n' "pulsecheck-data-old" "pulsecheck-candidate-test-data" > "$VOLUME_STATE_FILE"
     : > "$ACTION_LOG"
+    : > "$CASE_OUTPUT"
 
     local actual_status
+
     if (
         set +e
 
-        export STATE_FILE ACTION_LOG
+        export STATE_FILE VOLUME_STATE_FILE ACTION_LOG
         APP_CONTAINER="pulsecheck-app"
         PREVIOUS_CONTAINER="pulsecheck-app-previous"
         CANDIDATE_CONTAINER="pulsecheck-candidate-test"
         CANDIDATE_VOLUME="pulsecheck-candidate-test-data"
+        OLD_VOLUME="pulsecheck-data-old"
 
         OLD_CONTAINER_EXISTS="$old_exists"
+        OLD_CONTAINER_STOPPED="$old_stopped"
         PRODUCTION_SWITCH_STARTED="$switch_started"
         DEPLOYMENT_COMPLETE="$deployment_complete"
-        CURL_OK=1
+        CURL_OK="$curl_ok"
 
         cleanup_ecr_credentials() { :; }
         sleep() { :; }
+
         curl() {
             printf 'curl %s\n' "$*" >> "$ACTION_LOG"
             [[ "$CURL_OK" == "1" ]]
         }
 
-        source "$WORK_DIR/rollback-function.sh"
+        source "$WORK_DIR/rollback-functions.sh"
 
-        # Reproduce the real Jenkins EXIT trap behavior.
         trap rollback_and_cleanup EXIT
 
         if [[ "$deployment_complete" == "1" ]]; then
@@ -143,7 +170,7 @@ run_case() {
         else
             exit 1
         fi
-    ); then
+    ) > "$CASE_OUTPUT" 2>&1; then
         actual_status=0
     else
         actual_status=$?
@@ -151,63 +178,207 @@ run_case() {
 
     if [[ "$actual_status" -ne "$expected_status" ]]; then
         echo "FAIL: $name - expected exit $expected_status, got $actual_status"
+        cat "$CASE_OUTPUT"
         cat "$ACTION_LOG"
         return 1
     fi
 }
 
-# 1. Candidate check fails before production switch.
-# Current production and older rollback container must both remain untouched.
-run_case \
-    "candidate-failure" 1 0 0 \
-    $'pulsecheck-app\npulsecheck-app-previous\npulsecheck-candidate-test' \
-    1
+assert_container_present() {
+    local name="$1"
+    local container="$2"
 
-grep -Fxq "pulsecheck-app" "$WORK_DIR/candidate-failure.containers"
-grep -Fxq "pulsecheck-app-previous" "$WORK_DIR/candidate-failure.containers"
+    if ! grep -Fxq -- "$container" "$WORK_DIR/$name.containers"; then
+        echo "FAIL: $name - expected container missing: $container"
+        exit 1
+    fi
+}
 
-if grep -Fq "docker rm -f pulsecheck-app" "$WORK_DIR/candidate-failure.actions"; then
-    echo "FAIL: candidate failure removed current production."
+assert_container_absent() {
+    local name="$1"
+    local container="$2"
+
+    if grep -Fxq -- "$container" "$WORK_DIR/$name.containers"; then
+        echo "FAIL: $name - unexpected container remains: $container"
+        exit 1
+    fi
+}
+
+assert_start_called() {
+    local name="$1"
+
+    if ! grep -Fxq "docker start pulsecheck-app" "$WORK_DIR/$name.actions"; then
+        echo "FAIL: $name - original application was not explicitly started."
+        exit 1
+    fi
+}
+
+assert_health_checks() {
+    local name="$1"
+    local actions="$WORK_DIR/$name.actions"
+
+    grep -Fq 'curl -fsS http://127.0.0.1:8000/health' "$actions" || {
+        echo "FAIL: $name - health endpoint was not checked."
+        exit 1
+    }
+
+    grep -Fq 'curl -fsS http://127.0.0.1:8000/version' "$actions" || {
+        echo "FAIL: $name - version endpoint was not checked."
+        exit 1
+    }
+}
+
+assert_old_volume_preserved() {
+    local name="$1"
+
+    if ! grep -Fxq "pulsecheck-data-old" "$WORK_DIR/$name.volumes"; then
+        echo "FAIL: $name - previous production volume is missing."
+        exit 1
+    fi
+}
+
+assert_candidate_volume_removed() {
+    local name="$1"
+
+    if grep -Fxq "pulsecheck-candidate-test-data" "$WORK_DIR/$name.volumes"; then
+        echo "FAIL: $name - failed candidate volume was not removed."
+        exit 1
+    fi
+}
+
+assert_candidate_volume_preserved() {
+    local name="$1"
+
+    if ! grep -Fxq "pulsecheck-candidate-test-data" "$WORK_DIR/$name.volumes"; then
+        echo "FAIL: $name - successful deployment candidate volume is missing."
+        exit 1
+    fi
+}
+
+INITIAL=$'pulsecheck-app\npulsecheck-app-previous\npulsecheck-candidate-test'
+
+echo "===== CASE 1: Candidate fails before old container stops ====="
+
+run_case "candidate-failure" 1 0 0 0 "$INITIAL" 1 1
+
+assert_container_present "candidate-failure" "pulsecheck-app"
+assert_container_present "candidate-failure" "pulsecheck-app-previous"
+assert_container_absent "candidate-failure" "pulsecheck-candidate-test"
+assert_old_volume_preserved "candidate-failure"
+assert_candidate_volume_removed "candidate-failure"
+
+if grep -Fq "docker rm -f pulsecheck-app" \
+    "$WORK_DIR/candidate-failure.actions"; then
+    echo "FAIL: Candidate failure removed the current application."
     exit 1
 fi
 
-echo "PASS: candidate failure preserves current production and previous container."
-
-# 2. Production switch has started and the new application fails.
-# Previous container must be restored as the application.
-run_case \
-    "switch-failure" 1 1 0 \
-    $'pulsecheck-app\npulsecheck-app-previous' \
-    1
-
-grep -Fxq "pulsecheck-app" "$WORK_DIR/switch-failure.containers"
-
-if grep -Fxq "pulsecheck-app-previous" "$WORK_DIR/switch-failure.containers"; then
-    echo "FAIL: previous container was not renamed back."
+if grep -q '^curl ' "$WORK_DIR/candidate-failure.actions"; then
+    echo "FAIL: Health check unexpectedly ran before the old container stopped."
     exit 1
 fi
 
-grep -Fq "docker rename pulsecheck-app-previous pulsecheck-app" \
-    "$WORK_DIR/switch-failure.actions"
-grep -Fq "docker start pulsecheck-app" "$WORK_DIR/switch-failure.actions"
+echo "PASS: Candidate cleanup preserves production and previous container."
 
-echo "PASS: production-switch failure restores the previous container."
-
-# 3. Deployment completed successfully.
-# The new app and rollback container must remain in place.
-run_case \
-    "successful-deployment" 1 1 1 \
-    $'pulsecheck-app\npulsecheck-app-previous' \
-    0
-
-grep -Fxq "pulsecheck-app" "$WORK_DIR/successful-deployment.containers"
-grep -Fxq "pulsecheck-app-previous" "$WORK_DIR/successful-deployment.containers"
-
-if grep -Fq "docker rm -f pulsecheck-app" "$WORK_DIR/successful-deployment.actions"; then
-    echo "FAIL: successful deployment unexpectedly removed production."
-    exit 1
-fi
-
-echo "PASS: successful deployment leaves production and rollback containers intact."
 echo
-echo "All three mocked rollback scenarios passed."
+echo "===== CASE 2: Old container stopped, switch not started ====="
+
+run_case "old-stopped-failure" 1 1 0 0 "$INITIAL" 1 1
+
+assert_container_present "old-stopped-failure" "pulsecheck-app"
+assert_container_present "old-stopped-failure" "pulsecheck-app-previous"
+assert_container_absent "old-stopped-failure" "pulsecheck-candidate-test"
+assert_start_called "old-stopped-failure"
+assert_health_checks "old-stopped-failure"
+assert_old_volume_preserved "old-stopped-failure"
+assert_candidate_volume_removed "old-stopped-failure"
+
+grep -Fq "PASS: Original production application restarted." \
+    "$WORK_DIR/old-stopped-failure.output"
+
+echo "PASS: Original application is restarted and health/version checks succeed."
+
+echo
+echo "===== CASE 3: Production switch fails ====="
+
+run_case "switch-failure" 1 1 1 0 "$INITIAL" 1 1
+
+assert_container_present "switch-failure" "pulsecheck-app"
+assert_container_absent "switch-failure" "pulsecheck-app-previous"
+assert_container_absent "switch-failure" "pulsecheck-candidate-test"
+assert_start_called "switch-failure"
+assert_health_checks "switch-failure"
+assert_old_volume_preserved "switch-failure"
+assert_candidate_volume_removed "switch-failure"
+
+grep -Fq \
+    "docker rename pulsecheck-app-previous pulsecheck-app" \
+    "$WORK_DIR/switch-failure.actions"
+
+grep -Fq "PASS: Previous production application restored." \
+    "$WORK_DIR/switch-failure.output"
+
+echo "PASS: Previous container restored and health/version checks succeed."
+
+echo
+echo "===== CASE 4: Restored application fails health check ====="
+
+run_case "restore-health-failure" 1 1 1 0 "$INITIAL" 1 0
+
+assert_container_present "restore-health-failure" "pulsecheck-app"
+assert_container_absent "restore-health-failure" "pulsecheck-app-previous"
+assert_container_absent "restore-health-failure" "pulsecheck-candidate-test"
+assert_start_called "restore-health-failure"
+if ! grep -Fq 'curl -fsS http://127.0.0.1:8000/health' \
+    "$WORK_DIR/restore-health-failure.actions"; then
+    echo "FAIL: Failed restoration did not check the health endpoint."
+    exit 1
+fi
+
+if grep -Fq 'curl -fsS http://127.0.0.1:8000/version' \
+    "$WORK_DIR/restore-health-failure.actions"; then
+    echo "FAIL: Version endpoint was checked despite health failure."
+    exit 1
+fi
+
+assert_old_volume_preserved "restore-health-failure"
+assert_candidate_volume_removed "restore-health-failure"
+
+grep -Fq "ERROR: Previous application did not recover." \
+    "$WORK_DIR/restore-health-failure.output"
+
+if grep -Fq "PASS: Previous production application restored." \
+    "$WORK_DIR/restore-health-failure.output"; then
+    echo "FAIL: Unhealthy restoration was incorrectly reported as successful."
+    exit 1
+fi
+
+echo "PASS: Failed health check is detected and reported."
+
+echo
+echo "===== CASE 5: Deployment succeeds ====="
+
+SUCCESSFUL=$'pulsecheck-app\npulsecheck-app-previous'
+
+run_case "successful-deployment" 1 1 1 1 "$SUCCESSFUL" 0 1
+
+assert_container_present "successful-deployment" "pulsecheck-app"
+assert_container_present "successful-deployment" "pulsecheck-app-previous"
+assert_old_volume_preserved "successful-deployment"
+assert_candidate_volume_preserved "successful-deployment"
+
+if grep -Fq "docker rm -f pulsecheck-app" \
+    "$WORK_DIR/successful-deployment.actions"; then
+    echo "FAIL: Successful deployment unexpectedly removed production."
+    exit 1
+fi
+
+if grep -q '^curl ' "$WORK_DIR/successful-deployment.actions"; then
+    echo "FAIL: Rollback health checks ran after successful deployment."
+    exit 1
+fi
+
+echo "PASS: Successful deployment retains current and rollback containers."
+
+echo
+echo "ALL FIVE MOCKED ROLLBACK REGRESSION SCENARIOS PASSED."
