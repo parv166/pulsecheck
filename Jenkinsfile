@@ -293,6 +293,17 @@ print("PASS: SQLite database exists and is accessible")
             }
         }
 
+        stage('Real Docker Deployment Rollback Test') {
+            steps {
+                sh '''
+                    set -eu
+                    echo "Testing real Docker recovery and SQLite preservation"
+                    bash -n scripts/test-deploy-rollback-real.sh
+                    PULSECHECK_IMAGE="pulsecheck:${BUILD_NUMBER}" bash scripts/test-deploy-rollback-real.sh
+                '''
+            }
+        }
+
         stage('Push Image to Amazon ECR') {
             when {
                 expression { params.DEPLOY_TO_AWS }
