@@ -411,7 +411,7 @@ print("PASS: SQLite database exists and is accessible")
                             trap - EXIT
 
                             if [[ -n "$REMOTE_ASSET_DIR" ]]; then
-                                if [[ "$REMOTE_ASSET_DIR" =~ ^/tmp/pulsecheck-metrics-${BUILD_NUMBER}\.[A-Za-z0-9]+$ ]]; then
+                                if [[ "$REMOTE_ASSET_DIR" =~ ^/tmp/pulsecheck-metrics-${BUILD_NUMBER}[.][A-Za-z0-9]+$ ]]; then
                                     ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
                                       "rm -rf -- '$REMOTE_ASSET_DIR'" || \
                                       echo "WARNING: Could not remove remote deployment assets: $REMOTE_ASSET_DIR"
@@ -443,7 +443,7 @@ print("PASS: SQLite database exists and is accessible")
                         REMOTE_ASSET_DIR="$(ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
                           "umask 077 && mktemp -d '/tmp/pulsecheck-metrics-${BUILD_NUMBER}.XXXXXX'")"
 
-                        if [[ ! "$REMOTE_ASSET_DIR" =~ ^/tmp/pulsecheck-metrics-${BUILD_NUMBER}\.[A-Za-z0-9]+$ ]]; then
+                        if [[ ! "$REMOTE_ASSET_DIR" =~ ^/tmp/pulsecheck-metrics-${BUILD_NUMBER}[.][A-Za-z0-9]+$ ]]; then
                             echo "ERROR: EC2 returned an unexpected temporary asset path."
                             exit 1
                         fi
@@ -472,7 +472,7 @@ if [[ ! "$BUILD_TAG" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-REMOTE_ASSET_PATTERN="^/tmp/pulsecheck-metrics-${BUILD_TAG}\.[A-Za-z0-9]+$"
+REMOTE_ASSET_PATTERN="^/tmp/pulsecheck-metrics-${BUILD_TAG}[.][A-Za-z0-9]+$"
 
 if [[ ! "$REMOTE_ASSET_DIR" =~ $REMOTE_ASSET_PATTERN ]]; then
     echo "ERROR: Remote asset directory does not match this deployment."
