@@ -396,7 +396,7 @@ print("PASS: SQLite database exists and is accessible")
 
                         echo "Deploying build ${BUILD_NUMBER} to EC2..."
 
-                        REMOTE_ASSET_DIR="/tmp/pulsecheck-metrics-${BUILD_NUMBER}"
+                        REMOTE_ASSET_DIR=""
                         SSH_OPTIONS=(
                           -i "$EC2_SSH_KEY"
                           -o BatchMode=yes
@@ -406,20 +406,65 @@ print("PASS: SQLite database exists and is accessible")
                           -o ConnectTimeout=15
                         )
 
-                        echo "Transferring metrics collector assets to EC2..."
+                        cleanup_local_remote_assets() {
+                            local status=$?
+                            trap - EXIT
+
+                            if [[ -n "$REMOTE_ASSET_DIR" ]]; then
+                                if [[ "$REMOTE_ASSET_DIR" =~ ^/tmp/pulsecheck-metrics-${BUILD_NUMBER}\.[A-Za-z0-9]+$ ]]; then
+                                    ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
+                                      "rm -rf -- '$REMOTE_ASSET_DIR'" || \
+                                      echo "WARNING: Could not remove remote deployment assets: $REMOTE_ASSET_DIR"
+                                else
+                                    echo "WARNING: Refusing cleanup of an unexpected remote asset path."
+                                fi
+                            fi
+
+                            exit "$status"
+                        }
+                        trap cleanup_local_remote_assets EXIT
+
+                        echo "===== VALIDATING LOCAL DEPLOYMENT ASSETS ====="
+
+                        for asset in \
+                          collect_ec2_metrics.py \
+                          install_ec2_metrics.sh \
+                          validate_metrics_snapshot.py \
+                          backup_sqlite_volume.py; do
+                            test -s "$WORKSPACE/scripts/$asset"
+                        done
+
+                        for asset in pulsecheck-metrics.service pulsecheck-metrics.timer; do
+                            test -s "$WORKSPACE/deploy/systemd/$asset"
+                        done
+
+                        echo "===== CREATING PRIVATE REMOTE ASSET DIRECTORY ====="
+
+                        REMOTE_ASSET_DIR="$(ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
+                          "umask 077 && mktemp -d '/tmp/pulsecheck-metrics-${BUILD_NUMBER}.XXXXXX'")"
+
+                        if [[ ! "$REMOTE_ASSET_DIR" =~ ^/tmp/pulsecheck-metrics-${BUILD_NUMBER}\.[A-Za-z0-9]+$ ]]; then
+                            echo "ERROR: EC2 returned an unexpected temporary asset path."
+                            exit 1
+                        fi
+
+                        echo "Remote asset directory created."
+
+                        echo "===== TRANSFERRING DEPLOYMENT ASSETS ====="
 
                         tar -cf - \
                           -C "$WORKSPACE/scripts" collect_ec2_metrics.py install_ec2_metrics.sh validate_metrics_snapshot.py backup_sqlite_volume.py \
                           -C "$WORKSPACE/deploy/systemd" pulsecheck-metrics.service pulsecheck-metrics.timer \
                           | ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
-                              "mkdir -p '$REMOTE_ASSET_DIR' && tar -xf - -C '$REMOTE_ASSET_DIR'"
+                              "test -d '$REMOTE_ASSET_DIR' && test \"\$(stat -c '%a' '$REMOTE_ASSET_DIR')\" = 700 && tar -xf - -C '$REMOTE_ASSET_DIR'"
 
                         ssh "${SSH_OPTIONS[@]}" \
                           "$EC2_SSH_USER@$EC2_HOST" \
-                          "bash -s -- '${BUILD_NUMBER}'" <<'REMOTE_SCRIPT'
+                          "bash -s -- '${BUILD_NUMBER}' '${REMOTE_ASSET_DIR}'" <<'REMOTE_SCRIPT'
 set -Eeuo pipefail
 
 BUILD_TAG="$1"
+REMOTE_ASSET_DIR="${2:-}"
 AWS_REGION="ap-south-1"
 
 if [[ ! "$BUILD_TAG" =~ ^[0-9]+$ ]]; then
@@ -427,7 +472,56 @@ if [[ ! "$BUILD_TAG" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-REMOTE_ASSET_DIR="/tmp/pulsecheck-metrics-${BUILD_TAG}"
+REMOTE_ASSET_PATTERN="^/tmp/pulsecheck-metrics-${BUILD_TAG}\.[A-Za-z0-9]+$"
+
+if [[ ! "$REMOTE_ASSET_DIR" =~ $REMOTE_ASSET_PATTERN ]]; then
+    echo "ERROR: Remote asset directory does not match this deployment."
+    exit 1
+fi
+
+if [[ ! -d "$REMOTE_ASSET_DIR" || -L "$REMOTE_ASSET_DIR" ]]; then
+    echo "ERROR: Remote deployment asset directory is missing or unsafe."
+    exit 1
+fi
+
+REMOTE_ASSET_OWNER_MODE=$(stat -c '%u:%a' "$REMOTE_ASSET_DIR")
+
+if [[ "$REMOTE_ASSET_OWNER_MODE" != "$(id -u):700" ]]; then
+    echo "ERROR: Remote asset directory must be owned by the SSH user with mode 700."
+    exit 1
+fi
+
+cleanup_remote_assets() {
+    if [[ "$REMOTE_ASSET_DIR" =~ $REMOTE_ASSET_PATTERN ]] \
+      && [[ -d "$REMOTE_ASSET_DIR" && ! -L "$REMOTE_ASSET_DIR" ]] \
+      && [[ "$(stat -c '%u' "$REMOTE_ASSET_DIR" 2>/dev/null)" == "$(id -u)" ]]; then
+        rm -rf -- "$REMOTE_ASSET_DIR" || \
+            echo "WARNING: Remote deployment asset cleanup failed."
+    else
+        echo "WARNING: Refusing cleanup of an unexpected remote asset path."
+    fi
+}
+trap cleanup_remote_assets EXIT
+
+echo "===== VERIFYING TRANSFERRED DEPLOYMENT ASSETS ====="
+
+for asset in \
+    collect_ec2_metrics.py \
+    install_ec2_metrics.sh \
+    validate_metrics_snapshot.py \
+    backup_sqlite_volume.py \
+    pulsecheck-metrics.service \
+    pulsecheck-metrics.timer; do
+
+    if [[ ! -f "$REMOTE_ASSET_DIR/$asset" \
+       || -L "$REMOTE_ASSET_DIR/$asset" \
+       || ! -s "$REMOTE_ASSET_DIR/$asset" ]]; then
+        echo "ERROR: Required deployment asset is missing or invalid: $asset"
+        exit 1
+    fi
+done
+
+echo "PASS: All six deployment assets are present and non-empty."
 
 APP_CONTAINER="pulsecheck-app"
 PREVIOUS_CONTAINER="pulsecheck-app-previous"
@@ -440,6 +534,8 @@ DEPLOYMENT_COMPLETE=0
 OLD_CONTAINER_EXISTS=0
 OLD_CONTAINER_STOPPED=0
 PRODUCTION_SWITCH_STARTED=0
+CANDIDATE_VOLUME_CREATED=0
+CANDIDATE_CONTAINER_CREATED=0
 
 OLD_VOLUME=""
 DOCKER_CONFIG_DIR=""
@@ -541,45 +637,65 @@ print("PASS: Snapshot schema verified.")
 
 rollback_and_cleanup() {
     local exit_status=$?
+    local recovery_failed=0
     trap - EXIT
 
+    # Recovery errors must not prevent candidate cleanup.
+    set +e
     cleanup_ecr_credentials
+    cleanup_remote_assets
 
     if [ "$DEPLOYMENT_COMPLETE" -ne 1 ]; then
         echo "===== DEPLOYMENT FAILED: RECOVERY ====="
 
         if [ "$PRODUCTION_SWITCH_STARTED" -eq 1 ]; then
-
             if [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
-
                 if sudo docker inspect "$PREVIOUS_CONTAINER" >/dev/null 2>&1; then
                     echo "Restoring previous production container..."
-
                     sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
 
-                    sudo docker rename \
-                      "$PREVIOUS_CONTAINER" \
-                      "$APP_CONTAINER"
-
-                    sudo docker start "$APP_CONTAINER" >/dev/null
-
-                    if wait_for_app 8000; then
-                        echo "PASS: Previous production application restored."
+                    if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+                        echo "ERROR: Candidate application container could not be removed."
+                        recovery_failed=1
+                    elif sudo docker rename "$PREVIOUS_CONTAINER" "$APP_CONTAINER"; then
+                        if sudo docker start "$APP_CONTAINER" >/dev/null; then
+                            if wait_for_app 8000; then
+                                echo "PASS: Previous production application restored."
+                            else
+                                echo "ERROR: Previous application did not recover."
+                                sudo docker logs "$APP_CONTAINER" || true
+                                recovery_failed=1
+                            fi
+                        else
+                            echo "ERROR: Previous production container could not be started."
+                            sudo docker logs "$APP_CONTAINER" || true
+                            recovery_failed=1
+                        fi
                     else
-                        echo "ERROR: Previous application did not recover."
-                        sudo docker logs "$APP_CONTAINER" || true
+                        echo "ERROR: Previous production container could not be renamed."
+                        recovery_failed=1
                     fi
 
                 elif sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
                     echo "Previous container rename did not complete."
                     echo "Restarting the original application..."
 
-                    sudo docker start "$APP_CONTAINER" >/dev/null || true
-
+                    if sudo docker start "$APP_CONTAINER" >/dev/null; then
+                        if wait_for_app 8000; then
+                            echo "PASS: Original production application restarted."
+                        else
+                            echo "ERROR: Original application did not recover."
+                            sudo docker logs "$APP_CONTAINER" || true
+                            recovery_failed=1
+                        fi
+                    else
+                        echo "ERROR: Original production application could not be started."
+                        recovery_failed=1
+                    fi
                 else
                     echo "ERROR: Could not find the original production container."
+                    recovery_failed=1
                 fi
-
             else
                 echo "No previous production container existed."
                 sudo docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
@@ -587,31 +703,60 @@ rollback_and_cleanup() {
 
         elif [ "$OLD_CONTAINER_STOPPED" -eq 1 ] \
           && [ "$OLD_CONTAINER_EXISTS" -eq 1 ]; then
-
             echo "Restarting original application after candidate failure..."
 
             if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
-                sudo docker start "$APP_CONTAINER" >/dev/null || true
-
-                if wait_for_app 8000; then
-                    echo "PASS: Original production application restarted."
+                if sudo docker start "$APP_CONTAINER" >/dev/null; then
+                    if wait_for_app 8000; then
+                        echo "PASS: Original production application restarted."
+                    else
+                        echo "ERROR: Original application did not recover."
+                        sudo docker logs "$APP_CONTAINER" || true
+                        recovery_failed=1
+                    fi
                 else
-                    echo "ERROR: Original application did not recover."
-                    sudo docker logs "$APP_CONTAINER" || true
+                    echo "ERROR: Original production application could not be started."
+                    recovery_failed=1
                 fi
+            else
+                echo "ERROR: Original production container is missing."
+                recovery_failed=1
             fi
         fi
 
         echo "Removing failed candidate resources..."
 
-        sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
-        sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
-        sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1 || true
+        if [ "$CANDIDATE_CONTAINER_CREATED" -eq 1 ]; then
+            sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
+
+            if sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1; then
+                CANDIDATE_CONTAINER_CREATED=0
+            elif ! sudo docker inspect "$CANDIDATE_CONTAINER" >/dev/null 2>&1; then
+                CANDIDATE_CONTAINER_CREATED=0
+            else
+                echo "ERROR: Failed candidate container could not be removed."
+                recovery_failed=1
+            fi
+        fi
+
+        if [ "$CANDIDATE_VOLUME_CREATED" -eq 1 ]; then
+            if sudo docker volume rm "$CANDIDATE_VOLUME" >/dev/null 2>&1; then
+                CANDIDATE_VOLUME_CREATED=0
+            elif ! sudo docker volume inspect "$CANDIDATE_VOLUME" >/dev/null 2>&1; then
+                CANDIDATE_VOLUME_CREATED=0
+            else
+                echo "ERROR: Failed candidate volume could not be removed."
+                recovery_failed=1
+            fi
+        fi
+
+        if [ "$recovery_failed" -eq 1 ]; then
+            echo "CRITICAL: Automatic recovery was incomplete. Manual EC2 inspection is required."
+        fi
     fi
 
     exit "$exit_status"
 }
-
 trap rollback_and_cleanup EXIT
 
 if sudo docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
@@ -663,6 +808,12 @@ if [ "$OLD_CONTAINER_EXISTS" -eq 0 ] \
     exit 1
 fi
 
+if sudo docker inspect "$CANDIDATE_CONTAINER" >/dev/null 2>&1; then
+    echo "ERROR: Candidate container already exists: $CANDIDATE_CONTAINER"
+    echo "Refusing to remove or reuse a pre-existing container."
+    exit 1
+fi
+
 echo "===== AUTHENTICATING WITH AMAZON ECR ====="
 
 ACCOUNT_ID=$(aws sts get-caller-identity \
@@ -694,6 +845,7 @@ if sudo docker volume inspect "$CANDIDATE_VOLUME" >/dev/null 2>&1; then
 fi
 
 sudo docker volume create "$CANDIDATE_VOLUME" >/dev/null
+CANDIDATE_VOLUME_CREATED=1
 
 if [ "$OLD_DATA_VOLUME_EXISTS" -eq 1 ]; then
 
@@ -768,15 +920,13 @@ fi
 
 echo "===== INSTALLING EC2 METRICS COLLECTOR ====="
 
-bash "$REMOTE_ASSET_DIR/install_ec2_metrics.sh" "$BUILD_TAG"
+bash "$REMOTE_ASSET_DIR/install_ec2_metrics.sh" "$BUILD_TAG" "$REMOTE_ASSET_DIR"
 
 sudo test -s /var/lib/pulsecheck-metrics/metrics.json
 
 echo "===== TESTING DHI CANDIDATE ====="
 
-sudo docker rm -f "$CANDIDATE_CONTAINER" >/dev/null 2>&1 || true
-
-sudo docker run -d \
+sudo docker create \
   --name "$CANDIDATE_CONTAINER" \
   --read-only \
   --cap-drop=ALL \
@@ -788,7 +938,10 @@ sudo docker run -d \
   -p "127.0.0.1:${CANDIDATE_PORT}:8000" \
   -e APP_VERSION="$BUILD_TAG" \
   -e PULSECHECK_DB_PATH=/app/data/pulsecheck.db \
-  "$IMAGE"
+  "$IMAGE" >/dev/null
+CANDIDATE_CONTAINER_CREATED=1
+
+sudo docker start "$CANDIDATE_CONTAINER" >/dev/null
 
 if ! wait_for_app "$CANDIDATE_PORT"; then
     echo "ERROR: Candidate health or API checks failed."
@@ -848,6 +1001,7 @@ echo "Candidate passed. Preparing production switch."
 
 sudo docker stop -t 15 "$CANDIDATE_CONTAINER" >/dev/null
 sudo docker rm "$CANDIDATE_CONTAINER" >/dev/null
+CANDIDATE_CONTAINER_CREATED=0
 
 echo "===== PREPARING PRODUCTION SWITCH ====="
 

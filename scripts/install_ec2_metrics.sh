@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BUILD_TAG="${1:?Usage: install_ec2_metrics.sh BUILD_NUMBER}"
-ASSET_DIR="/tmp/pulsecheck-metrics-${BUILD_TAG}"
+BUILD_TAG="${1:?Usage: install_ec2_metrics.sh BUILD_NUMBER ASSET_DIR}"
+ASSET_DIR="${2:?Usage: install_ec2_metrics.sh BUILD_NUMBER ASSET_DIR}"
+ASSET_PATTERN="^/tmp/pulsecheck-metrics-${BUILD_TAG}\.[A-Za-z0-9]+$"
+
+if [[ ! "$ASSET_DIR" =~ $ASSET_PATTERN ]]; then
+    echo "ERROR: Asset directory does not match this deployment."
+    exit 1
+fi
+
+if [[ ! -d "$ASSET_DIR" || -L "$ASSET_DIR" ]]; then
+    echo "ERROR: Asset directory is missing or unsafe."
+    exit 1
+fi
 
 COLLECTOR_SOURCE="$ASSET_DIR/collect_ec2_metrics.py"
 SERVICE_SOURCE="$ASSET_DIR/pulsecheck-metrics.service"
@@ -161,5 +172,3 @@ sudo systemctl enable --now pulsecheck-metrics.timer
 sudo systemctl is-active --quiet pulsecheck-metrics.timer
 
 echo "PASS: PulseCheck metrics collector installed and timer active."
-
-sudo rm -rf -- "$ASSET_DIR"

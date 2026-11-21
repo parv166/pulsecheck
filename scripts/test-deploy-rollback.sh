@@ -67,6 +67,10 @@ docker_mock() {
             ;;
 
         rename)
+            if [[ "${MOCK_FAIL_RENAME:-0}" == "1" ]]; then
+                return 1
+            fi
+
             local old="$2"
             local new="$3"
 
@@ -79,6 +83,9 @@ docker_mock() {
             ;;
 
         start)
+            if [[ "${MOCK_FAIL_START:-0}" == "1" ]]; then
+                return 1
+            fi
             grep -Fxq -- "$2" "$STATE_FILE"
             ;;
 
@@ -137,8 +144,9 @@ run_case() {
 
     local actual_status
 
-    if (
-        set +e
+    set +e
+    (
+        set -Eeuo pipefail
 
         export STATE_FILE VOLUME_STATE_FILE ACTION_LOG
         APP_CONTAINER="pulsecheck-app"
@@ -151,9 +159,12 @@ run_case() {
         OLD_CONTAINER_STOPPED="$old_stopped"
         PRODUCTION_SWITCH_STARTED="$switch_started"
         DEPLOYMENT_COMPLETE="$deployment_complete"
+        CANDIDATE_CONTAINER_CREATED=1
+        CANDIDATE_VOLUME_CREATED=1
         CURL_OK="$curl_ok"
 
         cleanup_ecr_credentials() { :; }
+        cleanup_remote_assets() { :; }
         sleep() { :; }
 
         curl() {
@@ -170,11 +181,9 @@ run_case() {
         else
             exit 1
         fi
-    ) > "$CASE_OUTPUT" 2>&1; then
-        actual_status=0
-    else
-        actual_status=$?
-    fi
+    ) > "$CASE_OUTPUT" 2>&1
+    actual_status=$?
+    set -e
 
     if [[ "$actual_status" -ne "$expected_status" ]]; then
         echo "FAIL: $name - expected exit $expected_status, got $actual_status"
@@ -381,4 +390,42 @@ fi
 echo "PASS: Successful deployment retains current and rollback containers."
 
 echo
-echo "ALL FIVE MOCKED ROLLBACK REGRESSION SCENARIOS PASSED."
+echo "===== CASE 6: Previous-container rename fails during recovery ====="
+
+export MOCK_FAIL_RENAME=1
+run_case "restore-rename-failure" 1 1 1 0 "$INITIAL" 1 1
+unset MOCK_FAIL_RENAME
+
+assert_container_present "restore-rename-failure" "pulsecheck-app-previous"
+assert_container_absent "restore-rename-failure" "pulsecheck-app"
+assert_container_absent "restore-rename-failure" "pulsecheck-candidate-test"
+assert_candidate_volume_removed "restore-rename-failure"
+
+grep -Fq "ERROR: Previous production container could not be renamed." \
+    "$WORK_DIR/restore-rename-failure.output"
+grep -Fq "CRITICAL: Automatic recovery was incomplete." \
+    "$WORK_DIR/restore-rename-failure.output"
+
+echo "PASS: Rename failure is reported and candidate cleanup still runs."
+
+echo
+echo "===== CASE 7: Previous-container start fails during recovery ====="
+
+export MOCK_FAIL_START=1
+run_case "restore-start-failure" 1 1 1 0 "$INITIAL" 1 1
+unset MOCK_FAIL_START
+
+assert_container_present "restore-start-failure" "pulsecheck-app"
+assert_container_absent "restore-start-failure" "pulsecheck-app-previous"
+assert_container_absent "restore-start-failure" "pulsecheck-candidate-test"
+assert_candidate_volume_removed "restore-start-failure"
+
+grep -Fq "ERROR: Previous production container could not be started." \
+    "$WORK_DIR/restore-start-failure.output"
+grep -Fq "CRITICAL: Automatic recovery was incomplete." \
+    "$WORK_DIR/restore-start-failure.output"
+
+echo "PASS: Start failure is reported and candidate cleanup still runs."
+
+echo
+echo "ALL SEVEN MOCKED ROLLBACK REGRESSION SCENARIOS PASSED."

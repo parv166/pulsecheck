@@ -162,6 +162,9 @@ sudo() {
 cleanup_ecr_credentials() {
     :
 }
+cleanup_remote_assets() {
+    :
+}
 
 echo "===== CREATING ISOLATED DOCKER VOLUMES ====="
 
@@ -256,6 +259,8 @@ if (
     OLD_CONTAINER_STOPPED=0
     PRODUCTION_SWITCH_STARTED=0
     DEPLOYMENT_COMPLETE=0
+    CANDIDATE_CONTAINER_CREATED=1
+    CANDIDATE_VOLUME_CREATED=1
     DOCKER_CONFIG_DIR=""
 
     trap rollback_and_cleanup EXIT
