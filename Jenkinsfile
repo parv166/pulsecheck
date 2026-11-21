@@ -14,6 +14,12 @@ pipeline {
             defaultValue: false,
             description: 'Enable only when intentionally pushing to ECR and deploying to EC2.'
         )
+
+        booleanParam(
+            name: 'RUN_EC2_PREFLIGHT',
+            defaultValue: false,
+            description: 'Run read-only production EC2 checks; does not deploy or modify production.'
+        )
     }
 
     stages {
@@ -22,6 +28,16 @@ pipeline {
             steps {
                 checkout scm
                 echo 'Source code checkout completed'
+            }
+        }
+
+        stage('Validate Pipeline Parameters') {
+            steps {
+                script {
+                    if (params.RUN_EC2_PREFLIGHT && params.DEPLOY_TO_AWS) {
+                        error('Select either read-only EC2 preflight or production deployment, not both.')
+                    }
+                }
             }
         }
 
@@ -367,6 +383,224 @@ print("PASS: SQLite database exists and is accessible")
 
                         echo "Image successfully pushed to ECR."
                         echo "Temporary Docker credentials will now be removed."
+                    '''
+                }
+            }
+        }
+
+        stage('EC2 Read-only Preflight') {
+            when {
+                expression { params.RUN_EC2_PREFLIGHT }
+            }
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'pulsecheck-ec2-ssh',
+                        keyFileVariable: 'EC2_SSH_KEY',
+                        usernameVariable: 'EC2_SSH_USER'
+                    ),
+                    file(
+                        credentialsId: 'pulsecheck-ec2-known-hosts',
+                        variable: 'EC2_KNOWN_HOSTS'
+                    )
+                ]) {
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        set +x
+
+                        EC2_HOST="16.4.95.134"
+                        SSH_OPTIONS=(
+                          -i "$EC2_SSH_KEY"
+                          -o BatchMode=yes
+                          -o IdentitiesOnly=yes
+                          -o StrictHostKeyChecking=yes
+                          -o UserKnownHostsFile="$EC2_KNOWN_HOSTS"
+                          -o ConnectTimeout=15
+                        )
+
+                        ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" 'bash -s' <<'REMOTE_PREFLIGHT'
+set -Eeuo pipefail
+
+APP_CONTAINER="pulsecheck-app"
+
+echo "===== EC2 IDENTITY ====="
+hostname
+date -u
+id
+
+echo
+echo "===== DOCKER STATUS ====="
+sudo -n docker info --format 'Docker={{.ServerVersion}} Root={{.DockerRootDir}}'
+
+if ! sudo -n docker inspect "$APP_CONTAINER" >/dev/null 2>&1; then
+    echo "ERROR: Production application container was not found."
+    exit 1
+fi
+
+APP_STATE=$(sudo -n docker inspect --format '{{.State.Status}}' "$APP_CONTAINER")
+APP_HEALTH=$(sudo -n docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}not-configured{{end}}' "$APP_CONTAINER")
+APP_IMAGE=$(sudo -n docker inspect --format '{{.Config.Image}}' "$APP_CONTAINER")
+
+echo "Container=$APP_CONTAINER State=$APP_STATE Health=$APP_HEALTH Image=$APP_IMAGE"
+
+if [[ "$APP_STATE" != "running" || "$APP_HEALTH" == "unhealthy" ]]; then
+    echo "ERROR: Production container is not healthy enough for a deployment."
+    exit 1
+fi
+
+echo
+echo "===== LOCAL APPLICATION HEALTH ====="
+curl -fsS --max-time 10 http://127.0.0.1:8000/health
+echo
+curl -fsS --max-time 10 http://127.0.0.1:8000/version
+echo
+
+echo "===== PRODUCTION DATABASE VOLUME ====="
+MOUNT_TYPE=$(sudo -n docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Type}}{{end}}{{end}}' "$APP_CONTAINER")
+
+if [[ "$MOUNT_TYPE" != "volume" ]]; then
+    echo "ERROR: Expected a named Docker volume at /app/data; found: $MOUNT_TYPE"
+    exit 1
+fi
+
+DATA_VOLUME=$(sudo -n docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}{{end}}' "$APP_CONTAINER")
+
+if [[ -z "$DATA_VOLUME" ]]; then
+    echo "ERROR: Could not identify the production database volume."
+    exit 1
+fi
+
+VOLUME_MOUNTPOINT=$(sudo -n docker volume inspect --format '{{.Mountpoint}}' "$DATA_VOLUME")
+
+echo "Production volume=$DATA_VOLUME"
+echo "Volume mountpoint=$VOLUME_MOUNTPOINT"
+
+sudo -n test -s "$VOLUME_MOUNTPOINT/pulsecheck.db"
+sudo -n stat -c 'Database owner=%u:%g mode=%a size=%s bytes' "$VOLUME_MOUNTPOINT/pulsecheck.db"
+sudo -n df -h "$VOLUME_MOUNTPOINT"
+
+echo
+echo "===== READ-ONLY SQLITE INTEGRITY CHECK ====="
+
+sudo -n docker exec "$APP_CONTAINER" /app/venv/bin/python -c '
+import sqlite3
+
+path = "/app/data/pulsecheck.db"
+db = sqlite3.connect("file:" + path + "?mode=ro", uri=True, timeout=15)
+
+try:
+    integrity = db.execute("PRAGMA integrity_check").fetchone()[0]
+    if integrity != "ok":
+        raise RuntimeError("SQLite integrity check failed: " + str(integrity))
+
+    required = (
+        "monitored_targets",
+        "monitoring_history",
+        "incidents",
+        "auth_sessions",
+    )
+
+    existing = {
+        row[0] for row in
+        db.execute("SELECT name FROM sqlite_master WHERE type = ?", ("table",))
+    }
+
+    missing = sorted(set(required) - existing)
+    if missing:
+        raise RuntimeError("Required database tables are missing: " + ", ".join(missing))
+
+    for table in required:
+        count = db.execute("SELECT COUNT(*) FROM " + chr(34) + table + chr(34)).fetchone()[0]
+        print(f"{table}: {count} rows")
+
+    print("PASS: Production SQLite integrity is OK (read-only connection).")
+finally:
+    db.close()
+'
+
+
+echo
+echo "===== METRICS COLLECTOR ====="
+TIMER_STATE=$(sudo -n systemctl is-active pulsecheck-metrics.timer || true)
+echo "Metrics timer=$TIMER_STATE"
+
+if [[ "$TIMER_STATE" != "active" ]]; then
+    echo "ERROR: Metrics timer is not active."
+    exit 1
+fi
+
+METRICS_FILE="/var/lib/pulsecheck-metrics/metrics.json"
+sudo -n test -s "$METRICS_FILE"
+sudo -n stat -c 'Metrics file modified=%y size=%s bytes' "$METRICS_FILE"
+
+echo
+echo "===== VERIFYING EC2 INSTANCE IDENTITY ====="
+
+EXPECTED_INSTANCE_ID="i-0b76b45539d5c2557"
+
+IMDS_TOKEN=$(curl -fsS --max-time 5 \
+    -X PUT \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' \
+    http://169.254.169.254/latest/api/token)
+
+INSTANCE_ID=$(curl -fsS --max-time 5 \
+    -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    http://169.254.169.254/latest/meta-data/instance-id)
+
+unset IMDS_TOKEN
+
+if [[ "$INSTANCE_ID" != "$EXPECTED_INSTANCE_ID" ]]; then
+    echo "ERROR: Connected EC2 instance does not match expected production instance."
+    exit 1
+fi
+
+echo "PASS: Connected to expected production EC2 instance."
+
+echo
+echo "===== VALIDATING EC2 AND CLOUDWATCH METRICS ====="
+
+sudo -n test -s /usr/local/libexec/pulsecheck/validate_metrics_snapshot.py
+
+sudo -n /usr/bin/python3 \
+    /usr/local/libexec/pulsecheck/validate_metrics_snapshot.py \
+    "$METRICS_FILE" \
+    "$INSTANCE_ID"
+
+echo
+echo "===== CHECKING METRICS SNAPSHOT FRESHNESS ====="
+
+sudo -n /usr/bin/python3 - "$METRICS_FILE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+
+raw = data.get("collected_at")
+if not isinstance(raw, str):
+    raise SystemExit("ERROR: Snapshot collection timestamp is missing.")
+
+try:
+    collected = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit("ERROR: Snapshot collection timestamp is invalid.")
+
+if collected.tzinfo is None:
+    raise SystemExit("ERROR: Snapshot timestamp has no timezone.")
+
+age = (datetime.now(timezone.utc) - collected.astimezone(timezone.utc)).total_seconds()
+
+if age > 300 or age < -60:
+    raise SystemExit(f"ERROR: Metrics snapshot is stale or has a future timestamp ({age:.0f}s).")
+
+print(f"PASS: Metrics snapshot is fresh ({age:.0f} seconds old).")
+PY
+
+echo
+echo "PASS: Read-only EC2 preflight completed. No deployment was performed."
+REMOTE_PREFLIGHT
                     '''
                 }
             }
