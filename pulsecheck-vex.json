@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "urn:uuid:ff17333f-c11e-4a3e-b1bd-409e490b9819",
   "author": "PulseCheck Project Security Assessment",
-  "timestamp": "2026-11-16T18:11:00+05:30",
-  "version": 1,
+  "timestamp": "2026-11-22T04:34:47+05:30",
+  "version": 2,
   "statements": [
     {
       "@id": "urn:uuid:422fdd1e-57d0-4584-a240-5b7e720d2482",
@@ -18,6 +18,26 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
       "status_notes": "The vulnerability affects the xmlwf executable when using its -d output mode. Build 33 runtime verification found no xmlwf executable on PATH. The Trivy package inventory lists only libexpat shared libraries and documentation, not xmlwf. This assessment applies to the exact installed libexpat1 package version identified above."
+    },
+    {
+      "@id": "urn:uuid:07cbee48-b411-4771-bafb-5867b558a070",
+      "vulnerability": {
+        "name": "CVE-2026-124709"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi0?arch=amd64&distro=debian-13.7"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi0?arch=amd64&distro=debian-13.7"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi0?arch=amd64&distro=debian-13.7"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "status_notes": "This assessment applies only to the exact Debian 13.7 amd64 OpenSSL package versions listed above. PulseCheck runs Uvicorn using its default HTTP server configuration on TCP port 8000. Its monitoring client uses httpx.AsyncClient for HTTP/HTTPS requests. The inspected application does not configure a QUIC server listener or invoke OpenSSL QUIC server functionality. Reassess if QUIC server functionality is introduced. OpenSSL remains installed; this assessment does not patch the vulnerable library."
     }
   ]
 }
