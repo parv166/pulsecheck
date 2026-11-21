@@ -1050,7 +1050,7 @@ REMOTE_PREFLIGHT
                           -C "$WORKSPACE/scripts" collect_ec2_metrics.py install_ec2_metrics.sh validate_metrics_snapshot.py backup_sqlite_volume.py \
                           -C "$WORKSPACE/deploy/systemd" pulsecheck-metrics.service pulsecheck-metrics.timer \
                           | ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
-                              "test -d '$REMOTE_ASSET_DIR' && test \"\$(stat -c '%a' '$REMOTE_ASSET_DIR')\" = 700 && tar -xf - -C '$REMOTE_ASSET_DIR'"
+                              "bash -c 'set -euo pipefail; dir=\"\$1\"; [[ -d \"\$dir\" && ! -L \"\$dir\" ]]; mode=\$(stat -c %a \"\$dir\"); [[ \"\$mode\" == 700 ]]; tar -xf - -C \"\$dir\"' _ '$REMOTE_ASSET_DIR'"
 
                         ssh "${SSH_OPTIONS[@]}" \
                           "$EC2_SSH_USER@$EC2_HOST" \
