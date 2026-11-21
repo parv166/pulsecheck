@@ -61,6 +61,9 @@ pipeline {
         }
 
         stage('Build Docker Image') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 withCredentials([
                     usernamePassword(
@@ -101,6 +104,9 @@ pipeline {
         }
 
         stage('Trivy Vulnerability Scan') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 withCredentials([
                     usernamePassword(
@@ -208,6 +214,9 @@ pipeline {
         }
 
         stage('Container Smoke Test') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 sh '''
                     set -eu
@@ -296,6 +305,9 @@ print("PASS: SQLite database exists and is accessible")
         }
 
         stage('End-to-End Monitoring Integration Test') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 sh '''
                     set -eu
@@ -306,6 +318,9 @@ print("PASS: SQLite database exists and is accessible")
         }
 
         stage('Deployment Rollback Regression Test') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 sh '''
                     set -eu
@@ -316,6 +331,9 @@ print("PASS: SQLite database exists and is accessible")
         }
 
         stage('Real Docker Deployment Rollback Test') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 sh '''
                     set -eu
@@ -327,6 +345,9 @@ print("PASS: SQLite database exists and is accessible")
         }
 
         stage('SQLite Volume Migration Regression Test') {
+            when {
+                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+            }
             steps {
                 sh '''
                     set -eu
