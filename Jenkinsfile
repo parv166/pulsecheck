@@ -20,6 +20,12 @@ pipeline {
             defaultValue: false,
             description: 'Run read-only production EC2 checks; does not deploy or modify production.'
         )
+
+        booleanParam(
+            name: 'RUN_DB_BACKUP',
+            defaultValue: false,
+            description: 'Create and verify an encrypted production SQLite backup without deploying. Deployment runs this automatically.'
+        )
     }
 
     stages {
@@ -34,8 +40,8 @@ pipeline {
         stage('Validate Pipeline Parameters') {
             steps {
                 script {
-                    if (params.RUN_EC2_PREFLIGHT && params.DEPLOY_TO_AWS) {
-                        error('Select either read-only EC2 preflight or production deployment, not both.')
+                    if (params.RUN_EC2_PREFLIGHT && (params.DEPLOY_TO_AWS || params.RUN_DB_BACKUP)) {
+                        error('EC2 read-only preflight cannot be combined with a production backup or deployment.')
                     }
                 }
             }
@@ -328,6 +334,245 @@ print("PASS: SQLite database exists and is accessible")
                     bash -n scripts/test-sqlite-volume-migration.sh
                     PULSECHECK_IMAGE="pulsecheck:${BUILD_NUMBER}" bash scripts/test-sqlite-volume-migration.sh
                 '''
+            }
+        }
+
+        stage('Create and Verify Encrypted Production SQLite Backup') {
+            when {
+                expression { params.DEPLOY_TO_AWS || params.RUN_DB_BACKUP }
+            }
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'pulsecheck-ec2-ssh',
+                        keyFileVariable: 'EC2_SSH_KEY',
+                        usernameVariable: 'EC2_SSH_USER'
+                    ),
+                    file(
+                        credentialsId: 'pulsecheck-ec2-known-hosts',
+                        variable: 'EC2_KNOWN_HOSTS'
+                    ),
+                    string(
+                        credentialsId: 'pulsecheck-backup-passphrase',
+                        variable: 'PULSECHECK_BACKUP_PASSPHRASE'
+                    )
+                ]) {
+                    sh '''#!/bin/bash
+                        set -euo pipefail
+                        set +x
+                        umask 077
+
+                        EC2_HOST="16.4.95.134"
+                        ARTIFACT_DIR="$WORKSPACE/artifacts/pulsecheck-backups"
+                        BACKUP_ARTIFACT="$ARTIFACT_DIR/pulsecheck-${BUILD_NUMBER}.sqlite.pcbak"
+
+                        mkdir -p "$ARTIFACT_DIR"
+
+                        if [[ -e "$BACKUP_ARTIFACT" || -L "$BACKUP_ARTIFACT" ]]; then
+                            echo "ERROR: Backup artifact already exists; refusing to overwrite it."
+                            exit 1
+                        fi
+
+                        TMP_DIR=""
+                        KEEP_BACKUP_ARTIFACT=0
+
+                        cleanup() {
+                            local status=$?
+                            trap - EXIT
+
+                            if [[ "$status" -ne 0 && -n "$TMP_DIR" && -s "$TMP_DIR/remote-metadata.json" ]]; then
+                                echo "===== Remote backup diagnostics =====" >&2
+                                cat "$TMP_DIR/remote-metadata.json" >&2 || true
+                            fi
+
+                            if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
+                                rm -rf -- "$TMP_DIR" || true
+                            fi
+
+                            if [[ "$KEEP_BACKUP_ARTIFACT" != 1 ]]; then
+                                rm -f -- "$BACKUP_ARTIFACT" || true
+                            fi
+
+                            exit "$status"
+                        }
+
+                        trap cleanup EXIT
+
+                        TMP_DIR="$(mktemp -d "/dev/shm/pulsecheck-backup-${BUILD_NUMBER}.XXXXXX")"
+                        chmod 700 "$TMP_DIR"
+
+                        cat > "$TMP_DIR/verify_metadata.py" <<'VERIFY_METADATA_EOF'
+import hashlib
+import json
+import os
+import stat
+from pathlib import Path
+
+remote_lines = [
+    line
+    for line in Path("/secure-input/remote-metadata.json").read_text().splitlines()
+    if line.strip()
+]
+if len(remote_lines) != 1:
+    raise SystemExit("Expected exactly one remote SQLite metadata record.")
+
+remote = json.loads(remote_lines[0])
+restored = json.loads(Path("/secure/restored-metadata.json").read_text())
+encryption = json.loads(Path("/secure/encryption-metadata.json").read_text())
+
+required_tables = {
+    "monitored_targets",
+    "monitoring_history",
+    "incidents",
+    "auth_sessions",
+}
+
+if remote.get("integrity") != "ok" or restored.get("integrity") != "ok":
+    raise SystemExit("SQLite integrity verification did not pass.")
+
+if set(remote.get("counts", {})) != required_tables:
+    raise SystemExit("Remote snapshot is missing required table counts.")
+
+for field in ("sha256", "size_bytes", "counts"):
+    if remote.get(field) != restored.get(field):
+        raise SystemExit(f"Restored database does not match remote snapshot: {field}")
+
+artifact = Path(os.environ["BACKUP_ARTIFACT"])
+restored_file = Path("/secure/restored.db")
+
+if not artifact.is_file() or artifact.is_symlink():
+    raise SystemExit("Encrypted backup artifact is missing or invalid.")
+
+artifact_digest = hashlib.sha256()
+with artifact.open("rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        artifact_digest.update(chunk)
+
+artifact_size = artifact.stat().st_size
+if artifact_size != encryption.get("size_bytes"):
+    raise SystemExit("Encrypted artifact size does not match encryption metadata.")
+
+if artifact_digest.hexdigest() != encryption.get("sha256"):
+    raise SystemExit("Encrypted artifact SHA-256 does not match encryption metadata.")
+
+if stat.S_IMODE(artifact.stat().st_mode) != 0o600:
+    raise SystemExit("Encrypted artifact permissions are not 0600.")
+
+if stat.S_IMODE(restored_file.stat().st_mode) != 0o600:
+    raise SystemExit("Temporary restored database permissions are not 0600.")
+
+print("PASS: remote snapshot and decrypted SQLite database match.")
+print("PASS: integrity, required tables, counts, SHA-256, and size verified.")
+print("PASS: encrypted artifact hash, size, and permissions verified.")
+VERIFY_METADATA_EOF
+
+                        SSH_OPTIONS=(
+                          -i "$EC2_SSH_KEY"
+                          -o BatchMode=yes
+                          -o IdentitiesOnly=yes
+                          -o StrictHostKeyChecking=yes
+                          -o UserKnownHostsFile="$EC2_KNOWN_HOSTS"
+                          -o ConnectTimeout=15
+                          -o ServerAliveInterval=15
+                          -o ServerAliveCountMax=2
+                        )
+
+                        REMOTE_SCRIPT="$(cat <<'REMOTE_SCRIPT_EOF'
+set -Eeuo pipefail
+
+APP_CONTAINER="pulsecheck-app"
+
+APP_STATE=$(docker inspect --format "{{.State.Status}}" "$APP_CONTAINER")
+APP_HEALTH=$(docker inspect --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}not-configured{{end}}" "$APP_CONTAINER")
+
+if [[ "$APP_STATE" != "running" || "$APP_HEALTH" == "unhealthy" ]]; then
+    echo "Production application container is not healthy." >&2
+    exit 1
+fi
+
+curl -fsS --max-time 10 http://127.0.0.1:8000/health >/dev/null
+
+MOUNT_TYPE=$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/app/data\"}}{{.Type}}{{end}}{{end}}" "$APP_CONTAINER")
+
+if [[ "$MOUNT_TYPE" != "volume" ]]; then
+    echo "Expected a named Docker volume at /app/data." >&2
+    exit 1
+fi
+
+DATA_VOLUME=$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/app/data\"}}{{if eq .Type \"volume\"}}{{.Name}}{{end}}{{end}}{{end}}" "$APP_CONTAINER")
+
+if [[ -z "$DATA_VOLUME" ]]; then
+    echo "Could not identify the production SQLite Docker volume." >&2
+    exit 1
+fi
+
+docker volume inspect "$DATA_VOLUME" >/dev/null
+
+exec docker exec -i "$APP_CONTAINER" /app/venv/bin/python -
+REMOTE_SCRIPT_EOF
+)"
+
+                        REMOTE_COMMAND="sudo -n bash -c '$REMOTE_SCRIPT'"
+
+                        echo "===== Streaming production SQLite snapshot to Jenkins ====="
+
+                        ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" "$REMOTE_COMMAND" \
+                          < "$WORKSPACE/scripts/stream_live_sqlite.py" \
+                          2>"$TMP_DIR/remote-metadata.json" \
+                        | docker run --rm -i \
+                            --user "$(id -u):$(id -g)" \
+                            --tmpfs "/secure:rw,noexec,nosuid,nodev,size=512m,uid=$(id -u),gid=$(id -g),mode=0700" \
+                            -v "$WORKSPACE:/workspace" \
+                            -v "$TMP_DIR:/secure-input:ro" \
+                            -w /workspace \
+                            -e PYTHONDONTWRITEBYTECODE=1 \
+                            -e PULSECHECK_BACKUP_PASSPHRASE \
+                            -e "BACKUP_ARTIFACT=/workspace/artifacts/pulsecheck-backups/pulsecheck-${BUILD_NUMBER}.sqlite.pcbak" \
+                            python:3.14-slim \
+                            sh -c '
+                                set -eu
+
+                                python -m pip install \
+                                  --no-cache-dir \
+                                  --disable-pip-version-check \
+                                  --target /tmp/pulsecheck-python-packages \
+                                  cryptography==50.0.2
+
+                                export PYTHONPATH=/tmp/pulsecheck-python-packages
+
+                                python scripts/backup_crypto.py \
+                                  --encrypt-stdin \
+                                  --destination "$BACKUP_ARTIFACT" \
+                                  > /secure/encryption-metadata.json
+
+                                python scripts/backup_crypto.py \
+                                  --decrypt \
+                                  --source "$BACKUP_ARTIFACT" \
+                                  --destination /secure/restored.db \
+                                  > /secure/decryption-metadata.json
+
+                                python scripts/backup_sqlite_readonly.py \
+                                  --inspect /secure/restored.db \
+                                  > /secure/restored-metadata.json
+
+                                python /secure-input/verify_metadata.py
+                            '
+
+                        # Reached only when SSH, encryption, decryption, and
+                        # every metadata/integrity comparison succeeded.
+                        KEEP_BACKUP_ARTIFACT=1
+
+                        echo "PASS: encrypted production backup created and independently verified."
+                    '''
+                }
+
+                archiveArtifacts(
+                    artifacts: "artifacts/pulsecheck-backups/pulsecheck-${env.BUILD_NUMBER}.sqlite.pcbak",
+                    fingerprint: true,
+                    onlyIfSuccessful: true
+                )
+
+                echo 'Encrypted production SQLite backup archived in this Jenkins build.'
             }
         }
 
