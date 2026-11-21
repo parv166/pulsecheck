@@ -529,17 +529,21 @@ fi
 
 docker volume inspect "$DATA_VOLUME" >/dev/null
 
-exec docker exec -i "$APP_CONTAINER" /app/venv/bin/python -
+exec docker exec -i "$APP_CONTAINER" /app/venv/bin/python - <<'PULSECHECK_SQLITE_STREAM_EOF'
 REMOTE_SCRIPT_EOF
 )"
 
-                        REMOTE_SCRIPT_B64="$(printf '%s' "$REMOTE_SCRIPT" | base64 -w0)"
-                        REMOTE_COMMAND="sudo -n bash -c \"\$(printf '%s' '$REMOTE_SCRIPT_B64' | base64 -d)\""
+                        {
+                            printf '%s\n' "$REMOTE_SCRIPT"
+                            cat "$WORKSPACE/scripts/stream_live_sqlite.py"
+                            printf '\nPULSECHECK_SQLITE_STREAM_EOF\n'
+                        } > "$TMP_DIR/remote-backup.sh"
+                        chmod 600 "$TMP_DIR/remote-backup.sh"
 
                         echo "===== Streaming production SQLite snapshot to Jenkins ====="
 
-                        ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" "$REMOTE_COMMAND" \
-                          < "$WORKSPACE/scripts/stream_live_sqlite.py" \
+                        ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" sudo -n bash -s \
+                          < "$TMP_DIR/remote-backup.sh" \
                           2>"$TMP_DIR/remote-metadata.json" \
                         | docker run --rm -i \
                             --user "$(id -u):$(id -g)" \
