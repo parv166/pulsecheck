@@ -304,6 +304,17 @@ print("PASS: SQLite database exists and is accessible")
             }
         }
 
+        stage('SQLite Volume Migration Regression Test') {
+            steps {
+                sh '''
+                    set -eu
+                    echo "Testing SQLite migration, data equality, and volume permissions"
+                    bash -n scripts/test-sqlite-volume-migration.sh
+                    PULSECHECK_IMAGE="pulsecheck:${BUILD_NUMBER}" bash scripts/test-sqlite-volume-migration.sh
+                '''
+            }
+        }
+
         stage('Push Image to Amazon ECR') {
             when {
                 expression { params.DEPLOY_TO_AWS }
@@ -398,7 +409,7 @@ print("PASS: SQLite database exists and is accessible")
                         echo "Transferring metrics collector assets to EC2..."
 
                         tar -cf - \
-                          -C "$WORKSPACE/scripts" collect_ec2_metrics.py install_ec2_metrics.sh validate_metrics_snapshot.py \
+                          -C "$WORKSPACE/scripts" collect_ec2_metrics.py install_ec2_metrics.sh validate_metrics_snapshot.py backup_sqlite_volume.py \
                           -C "$WORKSPACE/deploy/systemd" pulsecheck-metrics.service pulsecheck-metrics.timer \
                           | ssh "${SSH_OPTIONS[@]}" "$EC2_SSH_USER@$EC2_HOST" \
                               "mkdir -p '$REMOTE_ASSET_DIR' && tar -xf - -C '$REMOTE_ASSET_DIR'"
@@ -721,62 +732,12 @@ if [ "$OLD_DATA_VOLUME_EXISTS" -eq 1 ]; then
       --user 0:0 \
       --mount "type=volume,source=$OLD_VOLUME,target=/source" \
       --mount "type=volume,source=$CANDIDATE_VOLUME,target=/dest" \
+      --mount "type=bind,source=$REMOTE_ASSET_DIR/backup_sqlite_volume.py,target=/backup_sqlite_volume.py,readonly" \
       --entrypoint /app/venv/bin/python \
       "$IMAGE" \
-      -c '
-import os
-import sqlite3
-
-source_path = "/source/pulsecheck.db"
-destination_path = "/dest/pulsecheck.db"
-
-if not os.path.isfile(source_path):
-    raise FileNotFoundError("Original production SQLite database is missing.")
-
-if os.path.exists(destination_path):
-    raise FileExistsError("Destination database already exists.")
-
-source = sqlite3.connect(source_path, timeout=30)
-destination = sqlite3.connect(destination_path, timeout=30)
-
-try:
-    source.backup(destination, pages=256, sleep=0.1)
-
-    integrity = destination.execute(
-        "PRAGMA integrity_check"
-    ).fetchone()[0]
-
-    if integrity != "ok":
-        raise RuntimeError(f"SQLite integrity check failed: {integrity}")
-
-    targets = destination.execute(
-        "SELECT COUNT(*) FROM monitored_targets"
-    ).fetchone()[0]
-
-    history = destination.execute(
-        "SELECT COUNT(*) FROM monitoring_history"
-    ).fetchone()[0]
-
-finally:
-    destination.close()
-    source.close()
-
-for name in os.listdir("/dest"):
-    file_path = os.path.join("/dest", name)
-
-    if os.path.isfile(file_path):
-        os.chown(file_path, 65532, 65532)
-        os.chmod(file_path, 0o640)
-
-os.chown("/dest", 65532, 65532)
-os.chmod("/dest", 0o750)
-
-print("SQLite backup completed successfully.")
-print("Integrity:", integrity)
-print("Monitored targets:", targets)
-print("Monitoring history records:", history)
-print("Destination ownership: 65532:65532")
-'
+      /backup_sqlite_volume.py \
+      --source /source \
+      --destination /dest
 
 else
     echo "No existing production data volume detected."
