@@ -513,14 +513,14 @@ fi
 
 curl -fsS --max-time 10 http://127.0.0.1:8000/health >/dev/null
 
-MOUNT_TYPE=$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/app/data\"}}{{.Type}}{{end}}{{end}}" "$APP_CONTAINER")
+MOUNT_TYPE=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Type}}{{end}}{{end}}' "$APP_CONTAINER")
 
 if [[ "$MOUNT_TYPE" != "volume" ]]; then
     echo "Expected a named Docker volume at /app/data." >&2
     exit 1
 fi
 
-DATA_VOLUME=$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"/app/data\"}}{{if eq .Type \"volume\"}}{{.Name}}{{end}}{{end}}{{end}}" "$APP_CONTAINER")
+DATA_VOLUME=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{if eq .Type "volume"}}{{.Name}}{{end}}{{end}}{{end}}' "$APP_CONTAINER")
 
 if [[ -z "$DATA_VOLUME" ]]; then
     echo "Could not identify the production SQLite Docker volume." >&2
@@ -533,7 +533,8 @@ exec docker exec -i "$APP_CONTAINER" /app/venv/bin/python -
 REMOTE_SCRIPT_EOF
 )"
 
-                        REMOTE_COMMAND="sudo -n bash -c '$REMOTE_SCRIPT'"
+                        REMOTE_SCRIPT_B64="$(printf '%s' "$REMOTE_SCRIPT" | base64 -w0)"
+                        REMOTE_COMMAND="sudo -n bash -c \"\$(printf '%s' '$REMOTE_SCRIPT_B64' | base64 -d)\""
 
                         echo "===== Streaming production SQLite snapshot to Jenkins ====="
 
