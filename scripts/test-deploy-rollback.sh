@@ -131,6 +131,7 @@ run_case() {
     local initial_containers="$6"
     local expected_status="$7"
     local curl_ok="$8"
+    local initial_exit_status="${9:-1}"
 
     STATE_FILE="$WORK_DIR/$name.containers"
     VOLUME_STATE_FILE="$WORK_DIR/$name.volumes"
@@ -179,7 +180,7 @@ run_case() {
         if [[ "$deployment_complete" == "1" ]]; then
             exit 0
         else
-            exit 1
+            exit "$initial_exit_status"
         fi
     ) > "$CASE_OUTPUT" 2>&1
     actual_status=$?
@@ -428,4 +429,16 @@ grep -Fq "CRITICAL: Automatic recovery was incomplete." \
 echo "PASS: Start failure is reported and candidate cleanup still runs."
 
 echo
-echo "ALL SEVEN MOCKED ROLLBACK REGRESSION SCENARIOS PASSED."
+echo "===== CASE 8: Original deployment exit status is preserved ====="
+
+export MOCK_FAIL_RENAME=1
+run_case "preserve-exit-status" 1 1 1 0 "$INITIAL" 23 1 23
+unset MOCK_FAIL_RENAME
+
+grep -Fq "CRITICAL: Automatic recovery was incomplete." \
+    "$WORK_DIR/preserve-exit-status.output"
+
+echo "PASS: Rollback failure preserves the original exit status 23."
+
+echo
+echo "ALL EIGHT MOCKED ROLLBACK REGRESSION SCENARIOS PASSED."
