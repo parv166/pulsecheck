@@ -26,6 +26,12 @@ pipeline {
             defaultValue: false,
             description: 'Create and verify an encrypted production SQLite backup without deploying. Deployment runs this automatically.'
         )
+
+        booleanParam(
+            name: 'RUN_DB_RESTORE',
+            defaultValue: false,
+            description: 'Restore and verify the archived encrypted SQLite backup in an isolated temporary container. Does not access production.'
+        )
     }
 
     stages {
@@ -40,14 +46,21 @@ pipeline {
         stage('Validate Pipeline Parameters') {
             steps {
                 script {
-                    if (params.RUN_EC2_PREFLIGHT && (params.DEPLOY_TO_AWS || params.RUN_DB_BACKUP)) {
-                        error('EC2 read-only preflight cannot be combined with a production backup or deployment.')
+                    if (params.RUN_EC2_PREFLIGHT && (params.DEPLOY_TO_AWS || params.RUN_DB_BACKUP || params.RUN_DB_RESTORE)) {
+                        error('EC2 read-only preflight cannot be combined with a production backup, restore, or deployment.')
+                    }
+
+                    if (params.RUN_DB_RESTORE && (params.DEPLOY_TO_AWS || params.RUN_DB_BACKUP)) {
+                        error('Database restore mode must run alone, without deployment or a new production backup.')
                     }
                 }
             }
         }
 
         stage('Run Unit Tests') {
+            when {
+                expression { !params.RUN_DB_RESTORE }
+            }
             steps {
                 sh '''
                     docker run --rm \
@@ -62,7 +75,7 @@ pipeline {
 
         stage('Build Docker Image') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 withCredentials([
@@ -105,7 +118,7 @@ pipeline {
 
         stage('Trivy Vulnerability Scan') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 withCredentials([
@@ -215,7 +228,7 @@ pipeline {
 
         stage('Container Smoke Test') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 sh '''
@@ -306,7 +319,7 @@ print("PASS: SQLite database exists and is accessible")
 
         stage('End-to-End Monitoring Integration Test') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 sh '''
@@ -319,7 +332,7 @@ print("PASS: SQLite database exists and is accessible")
 
         stage('Deployment Rollback Regression Test') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 sh '''
@@ -332,7 +345,7 @@ print("PASS: SQLite database exists and is accessible")
 
         stage('Real Docker Deployment Rollback Test') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 sh '''
@@ -346,7 +359,7 @@ print("PASS: SQLite database exists and is accessible")
 
         stage('SQLite Volume Migration Regression Test') {
             when {
-                expression { !params.RUN_DB_BACKUP || params.DEPLOY_TO_AWS }
+                expression { (!params.RUN_DB_BACKUP && !params.RUN_DB_RESTORE) || params.DEPLOY_TO_AWS }
             }
             steps {
                 sh '''
@@ -599,6 +612,82 @@ REMOTE_SCRIPT_EOF
                 )
 
                 echo 'Encrypted production SQLite backup archived in this Jenkins build.'
+            }
+        }
+
+        stage('Restore and Verify Archived Encrypted SQLite Backup') {
+            when {
+                expression { params.RUN_DB_RESTORE }
+            }
+            steps {
+                withCredentials([
+                    string(
+                        credentialsId: 'pulsecheck-backup-passphrase',
+                        variable: 'PULSECHECK_BACKUP_PASSPHRASE'
+                    )
+                ]) {
+                    sh '''#!/bin/bash
+                        set -Eeuo pipefail
+                        set +x
+                        umask 077
+
+                        RESTORE_BACKUP="/var/lib/jenkins/restore-input/pulsecheck-70.sqlite.pcbak"
+
+                        if [[ ! -f "$RESTORE_BACKUP" || -L "$RESTORE_BACKUP" || ! -r "$RESTORE_BACKUP" ]]; then
+                            echo "ERROR: Encrypted restore input is missing, unreadable, or a symlink." >&2
+                            exit 1
+                        fi
+
+                        echo "===== VERIFY ENCRYPTED RESTORE INPUT ====="
+                        printf 'Encrypted input size: %s bytes\\n' "$(stat -c '%s' "$RESTORE_BACKUP")"
+
+                        echo "===== DECRYPT AND VERIFY IN ISOLATED TMPFS ====="
+
+                        docker run --rm \
+                          --tmpfs "/restore:rw,noexec,nosuid,nodev,size=512m,mode=0700" \
+                          --mount "type=bind,src=$WORKSPACE/scripts,dst=/scripts,readonly" \
+                          --mount "type=bind,src=$RESTORE_BACKUP,dst=/backup.pcbak,readonly" \
+                          -e PULSECHECK_BACKUP_PASSPHRASE \
+                          python:3.14-slim \
+                          sh -eu -c '
+                            set -eu
+                            umask 077
+                            trap "rm -f /restore/restored.db /restore/decryption-metadata.json /restore/sqlite-metadata.json" EXIT
+
+                            python -m pip install \
+                              --quiet \
+                              --no-cache-dir \
+                              --disable-pip-version-check \
+                              --target /tmp/restore-deps \
+                              cryptography==50.0.2
+
+                            export PYTHONPATH=/tmp/restore-deps
+
+                            python /scripts/backup_crypto.py \
+                              --decrypt \
+                              --source /backup.pcbak \
+                              --destination /restore/restored.db \
+                              > /restore/decryption-metadata.json
+
+                            echo "PASS: encrypted backup authenticated and decrypted."
+
+                            python /scripts/backup_sqlite_readonly.py \
+                              --inspect /restore/restored.db \
+                              > /restore/sqlite-metadata.json
+
+                            echo "===== RESTORED DATABASE VERIFICATION ====="
+                            cat /restore/sqlite-metadata.json
+
+                            rm -f /restore/restored.db
+                            test ! -e /restore/restored.db
+
+                            echo "PASS: SQLite integrity and required-table checks completed."
+                            echo "PASS: temporary plaintext database removed."
+                          '
+
+                        echo "PASS: archived encrypted backup restore drill completed."
+                    '''
+                }
             }
         }
 
