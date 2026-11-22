@@ -6,12 +6,16 @@ services:
 
     image: pulsecheck:1.0.0
 
+    env_file:
+      - ./secrets/auth.local.env
+
     ports:
       - "127.0.0.1:${PULSECHECK_HOST_PORT:-8000}:8000"
 
     environment:
       APP_VERSION: "1.0.0"
       PULSECHECK_DB_PATH: "/app/data/pulsecheck.db"
+      PULSECHECK_CHECK_INTERVAL_SECONDS: "${PULSECHECK_CHECK_INTERVAL_SECONDS:-10}"
 
     volumes:
       - pulsecheck_data:/app/data

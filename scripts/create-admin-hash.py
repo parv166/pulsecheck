@@ -34,7 +34,7 @@ def main():
 
     content = (
         f"PULSECHECK_ADMIN_USERNAME={username}\n"
-        f"PULSECHECK_ADMIN_PASSWORD_HASH={encoded}\n"
+        f"PULSECHECK_ADMIN_PASSWORD_HASH='{encoded}'\n"
         "PULSECHECK_COOKIE_SECURE=false\n"
     )
 
