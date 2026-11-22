@@ -42,6 +42,17 @@ TransitionCallback = Callable[
 logger = logging.getLogger(__name__)
 
 
+def _sort_ip_addresses_ipv4_first(addresses: set[str]) -> list[str]:
+    """Prefer IPv4, with stable ordering within each address family."""
+    return sorted(
+        addresses,
+        key=lambda address: (
+            ipaddress.ip_address(address).version != 4,
+            int(ipaddress.ip_address(address)),
+        ),
+    )
+
+
 def validate_target_url(url: str) -> str:
     """Validate a monitoring URL and reject obviously unsafe destinations."""
 
@@ -144,7 +155,7 @@ async def ensure_public_destination(
                 "Test destination did not resolve exclusively "
                 "to its configured private IP address."
             )
-        return sorted(resolved_ips)
+        return _sort_ip_addresses_ipv4_first(resolved_ips)
 
     for address in resolved_ips:
         if not ipaddress.ip_address(address).is_global:
@@ -152,7 +163,7 @@ async def ensure_public_destination(
                 "Target resolves to a private or non-public IP address."
             )
 
-    return sorted(resolved_ips)
+    return _sort_ip_addresses_ipv4_first(resolved_ips)
 
 
 def _build_pinned_request(
@@ -366,35 +377,42 @@ class MonitoringService:
         error = None
 
         try:
-            request_url = target.url
-            request_headers = None
-            request_extensions = None
+            request_candidates = [(target.url, None, None)]
 
             if self._resolve_dns:
                 resolved_addresses = await ensure_public_destination(
                     target.url,
                     self._allowed_test_destinations,
                 )
-                (
-                    request_url,
-                    request_headers,
-                    request_extensions,
-                ) = _build_pinned_request(
-                    target.url,
-                    resolved_addresses[0],
-                )
+                request_candidates = [
+                    _build_pinned_request(target.url, address)
+                    for address in resolved_addresses
+                ]
+
+            last_connect_error = None
 
             async with self._semaphore:
+                for request_url, request_headers, request_extensions in request_candidates:
+                    try:
+                        async with self._client.stream(
+                            "GET",
+                            request_url,
+                            headers=request_headers,
+                            extensions=request_extensions,
+                            follow_redirects=False,
+                        ) as response:
+                            status_code = response.status_code
 
-                async with self._client.stream(
-                    "GET",
-                    request_url,
-                    headers=request_headers,
-                    extensions=request_extensions,
-                    follow_redirects=False,
-                ) as response:
+                    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                        last_connect_error = exc
+                        continue
 
-                    status_code = response.status_code
+                    # A real HTTP response, including HTTP 503, ends fallback.
+                    break
+
+                else:
+                    if last_connect_error is not None:
+                        raise last_connect_error
 
             healthy = 200 <= status_code < 300
 
