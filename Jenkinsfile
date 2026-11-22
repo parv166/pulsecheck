@@ -156,7 +156,7 @@ pipeline {
                           --verify \
                           --skip-tlog \
                           --output dhi-python-vex.json \
-                          registry://dhi.io/python:3.14@sha256:de56731ea3ff80eef32ded2c4a32968f0c02f9f6358a93d2224f07dff42e7ae2
+                          registry://dhi.io/python@sha256:4a537bd4d0042e56efa5d97e43e34b11b08d5e018e4890ce107a9f290190197a
 
                         test -s dhi-python-vex.json
                         test -s pulsecheck-vex.json

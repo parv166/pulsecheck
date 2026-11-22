@@ -20,7 +20,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
 
 
 # Runtime stage: minimal hardened Python image
-FROM dhi.io/python:3.14@sha256:de56731ea3ff80eef32ded2c4a32968f0c02f9f6358a93d2224f07dff42e7ae2 AS runtime-stage
+FROM dhi.io/python@sha256:4a537bd4d0042e56efa5d97e43e34b11b08d5e018e4890ce107a9f290190197a AS runtime-stage
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
