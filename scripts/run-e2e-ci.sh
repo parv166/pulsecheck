@@ -80,12 +80,46 @@ COMPOSE=(
     -f compose.test.yaml
 )
 
+AUTH_ENV_FILE="secrets/auth.local.env"
+AUTH_ENV_FILE_CREATED=0
+SECRETS_DIR_CREATED=0
+
 cleanup() {
     echo "===== Cleaning up CI test environment ====="
     "${COMPOSE[@]}" down --volumes --remove-orphans || true
+
+    if [[ "$AUTH_ENV_FILE_CREATED" -eq 1 ]]; then
+        rm -f -- "$AUTH_ENV_FILE" || true
+    fi
+
+    if [[ "$SECRETS_DIR_CREATED" -eq 1 ]]; then
+        rmdir -- secrets 2>/dev/null || true
+    fi
 }
 
 trap cleanup EXIT
+
+# The base Compose file requires this local env_file. CI credentials are
+# supplied by compose.test.yaml, so create an empty placeholder when absent.
+if [[ -L "$AUTH_ENV_FILE" ]]; then
+    echo "ERROR: Refusing to use a symlink for the CI auth env file."
+    exit 1
+elif [[ ! -e "$AUTH_ENV_FILE" ]]; then
+    if [[ ! -d secrets ]]; then
+        if [[ -e secrets || -L secrets ]]; then
+            echo "ERROR: secrets exists but is not a directory."
+            exit 1
+        fi
+        mkdir -m 700 secrets
+        SECRETS_DIR_CREATED=1
+    fi
+
+    (umask 077 && : > "$AUTH_ENV_FILE")
+    AUTH_ENV_FILE_CREATED=1
+elif [[ ! -f "$AUTH_ENV_FILE" ]]; then
+    echo "ERROR: CI auth env path exists but is not a regular file."
+    exit 1
+fi
 
 echo "===== E2E CONFIGURATION ====="
 echo "Image: $PULSECHECK_IMAGE"
