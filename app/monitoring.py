@@ -104,7 +104,7 @@ def validate_target_url(url: str) -> str:
 async def ensure_public_destination(
     url: str,
     allowed_test_destinations: dict[str, set[str]] | None = None,
-) -> None:
+) -> list[str]:
     """
     Reject non-public destinations except for an exact, explicitly
     configured test hostname and its expected private IP.
@@ -144,13 +144,45 @@ async def ensure_public_destination(
                 "Test destination did not resolve exclusively "
                 "to its configured private IP address."
             )
-        return
+        return sorted(resolved_ips)
 
     for address in resolved_ips:
         if not ipaddress.ip_address(address).is_global:
             raise ValueError(
                 "Target resolves to a private or non-public IP address."
             )
+
+    return sorted(resolved_ips)
+
+
+def _build_pinned_request(
+    url: str,
+    address: str,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Connect to a validated IP while retaining the original hostname."""
+
+    original_url = httpx.URL(url)
+    original_host = original_url.raw_host.decode("ascii")
+
+    # Literal IP URLs already connect directly.
+    try:
+        ipaddress.ip_address(original_host)
+    except ValueError:
+        pass
+    else:
+        return url, {}, {}
+
+    pinned_ip = str(ipaddress.ip_address(address))
+    pinned_url = str(original_url.copy_with(host=pinned_ip))
+
+    # Preserve HTTP virtual hosting and HTTPS certificate/SNI validation.
+    headers = {"Host": original_url.netloc.decode("ascii")}
+    extensions = {}
+
+    if original_url.scheme == "https":
+        extensions["sni_hostname"] = original_host
+
+    return pinned_url, headers, extensions
 
 
 class MonitoringService:
@@ -218,10 +250,15 @@ class MonitoringService:
                 normalized_hostname
             ] = normalized_addresses
 
+        # Pinned requests use IP-based URLs. Disable keep-alive reuse so
+        # different hostnames sharing an IP cannot reuse another host's
+        # TLS connection and hostname verification.
+        # Injected clients used with resolve_dns=True must apply this limit too.
         self._client = client or httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=False,
             trust_env=False,
+            limits=httpx.Limits(max_keepalive_connections=0),
         )
 
         self._owns_client = client is None
@@ -329,17 +366,32 @@ class MonitoringService:
         error = None
 
         try:
+            request_url = target.url
+            request_headers = None
+            request_extensions = None
+
             if self._resolve_dns:
-                await ensure_public_destination(
+                resolved_addresses = await ensure_public_destination(
                     target.url,
                     self._allowed_test_destinations,
+                )
+                (
+                    request_url,
+                    request_headers,
+                    request_extensions,
+                ) = _build_pinned_request(
+                    target.url,
+                    resolved_addresses[0],
                 )
 
             async with self._semaphore:
 
                 async with self._client.stream(
                     "GET",
-                    target.url,
+                    request_url,
+                    headers=request_headers,
+                    extensions=request_extensions,
+                    follow_redirects=False,
                 ) as response:
 
                     status_code = response.status_code

@@ -149,6 +149,63 @@ def test_test_allowlist_requires_exact_private_destination(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_check_target_pins_validated_ip_and_preserves_https_hostname(
+    monkeypatch,
+):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        dns_calls = 0
+        requests = []
+
+        async def fake_getaddrinfo(hostname, port, *, type):
+            nonlocal dns_calls
+            dns_calls += 1
+
+            # A later DNS lookup would return a private IP.
+            address = "8.8.8.8" if dns_calls == 1 else "127.0.0.1"
+
+            return [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    (address, port),
+                )
+            ]
+
+        monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(status_code=200)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            service = MonitoringService(client=client)
+            target = service.register_target(
+                "DNS pinning test",
+                "https://example.com:8443/health?check=1",
+            )
+
+            result = await service.check_target(target.id)
+
+            assert result.status == "UP"
+            assert dns_calls == 1
+            assert len(requests) == 1
+
+            request = requests[0]
+            assert request.url.host == "8.8.8.8"
+            assert request.url.port == 8443
+            assert request.url.path == "/health"
+            assert request.url.query == b"check=1"
+            assert request.headers["host"] == "example.com:8443"
+            assert request.extensions["sni_hostname"] == "example.com"
+
+    asyncio.run(scenario())
+
+
 def test_test_allowlist_rejects_public_ip():
     with pytest.raises(ValueError, match="private"):
         MonitoringService(
