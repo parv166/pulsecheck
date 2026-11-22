@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -72,13 +72,15 @@ class Database:
                     target_name TEXT NOT NULL,
                     target_url TEXT NOT NULL,
                     status TEXT NOT NULL
-                        CHECK(status IN ('ACTIVE', 'RESOLVED')),
+                        CHECK(status IN ('ACTIVE', 'RESOLVED', 'DISMISSED')),
                     started_at TEXT NOT NULL,
                     resolved_at TEXT,
                     status_code INTEGER,
                     latency_ms REAL NOT NULL,
                     consecutive_failures INTEGER NOT NULL,
-                    error TEXT
+                    error TEXT,
+                    dismissed_at TEXT,
+                    dismissal_reason TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS
@@ -103,6 +105,125 @@ class Database:
                 ON auth_sessions(expires_at);
                 """
             )
+
+            self._migrate_incidents(connection)
+
+    @staticmethod
+    def _migrate_incidents(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add DISMISSED incidents while preserving existing records."""
+        connection.execute("BEGIN IMMEDIATE")
+
+        schema_row = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'incidents'
+            """
+        ).fetchone()
+
+        if schema_row is None:
+            return
+
+        schema = (schema_row["sql"] or "").upper()
+
+        if "DISMISSED" not in schema:
+            connection.execute(
+                "DROP INDEX IF EXISTS idx_incidents_status_started"
+            )
+            connection.execute(
+                "DROP INDEX IF EXISTS idx_incidents_one_active_per_target"
+            )
+            connection.execute(
+                "ALTER TABLE incidents RENAME TO incidents_legacy"
+            )
+            connection.execute(
+                """
+                CREATE TABLE incidents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    target_url TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK(status IN ('ACTIVE', 'RESOLVED', 'DISMISSED')),
+                    started_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    status_code INTEGER,
+                    latency_ms REAL NOT NULL,
+                    consecutive_failures INTEGER NOT NULL,
+                    error TEXT,
+                    dismissed_at TEXT,
+                    dismissal_reason TEXT
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO incidents (
+                    id, target_id, target_name, target_url, status,
+                    started_at, resolved_at, status_code, latency_ms,
+                    consecutive_failures, error
+                )
+                SELECT
+                    id, target_id, target_name, target_url, status,
+                    started_at, resolved_at, status_code, latency_ms,
+                    consecutive_failures, error
+                FROM incidents_legacy
+                """
+            )
+            connection.execute("DROP TABLE incidents_legacy")
+        else:
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(incidents)"
+                ).fetchall()
+            }
+            if "dismissed_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE incidents ADD COLUMN dismissed_at TEXT"
+                )
+            if "dismissal_reason" not in columns:
+                connection.execute(
+                    "ALTER TABLE incidents ADD COLUMN dismissal_reason TEXT"
+                )
+
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_incidents_status_started
+            ON incidents(status, started_at DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_incidents_one_active_per_target
+            ON incidents(target_id)
+            WHERE status = 'ACTIVE'
+            """
+        )
+
+        # Preserve incidents whose monitors were deleted by older versions.
+        migration_time = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            """
+            UPDATE incidents
+            SET status = 'DISMISSED',
+                dismissed_at = ?,
+                dismissal_reason = ?
+            WHERE status = 'ACTIVE'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM monitored_targets AS target
+                  WHERE target.id = incidents.target_id
+              )
+            """,
+            (
+                migration_time,
+                "Monitor was deleted before incident dismissal tracking was added",
+            ),
+        )
 
     def save_target(self, target: MonitoredTarget) -> None:
         with self._connection() as connection:
@@ -155,6 +276,30 @@ class Database:
 
     def delete_target(self, target_id: str) -> bool:
         with self._connection() as connection:
+            exists = connection.execute(
+                "SELECT 1 FROM monitored_targets WHERE id = ?",
+                (target_id,),
+            ).fetchone()
+
+            if exists is None:
+                return False
+
+            dismissed_at = datetime.now(timezone.utc).isoformat()
+            connection.execute(
+                """
+                UPDATE incidents
+                SET status = 'DISMISSED',
+                    dismissed_at = ?,
+                    dismissal_reason = ?
+                WHERE target_id = ? AND status = 'ACTIVE'
+                """,
+                (
+                    dismissed_at,
+                    "Monitor deleted while DOWN",
+                    target_id,
+                ),
+            )
+
             cursor = connection.execute(
                 "DELETE FROM monitored_targets WHERE id = ?",
                 (target_id,),
@@ -352,7 +497,7 @@ class Database:
         status: str = "all",
         limit: int = 100,
     ) -> list[dict]:
-        if status not in {"all", "active", "resolved"}:
+        if status not in {"all", "active", "resolved", "dismissed"}:
             raise ValueError("Invalid incident status.")
 
         if not 1 <= limit <= 200:
@@ -361,6 +506,7 @@ class Database:
         filter_status = {
             "active": "ACTIVE",
             "resolved": "RESOLVED",
+            "dismissed": "DISMISSED",
         }.get(status)
 
         with self._connection() as connection:
@@ -399,11 +545,13 @@ class Database:
         counts = {row["status"]: row["count"] for row in rows}
         active = counts.get("ACTIVE", 0)
         resolved = counts.get("RESOLVED", 0)
+        dismissed = counts.get("DISMISSED", 0)
 
         return {
             "active": active,
             "resolved": resolved,
-            "total": active + resolved,
+            "dismissed": dismissed,
+            "total": active + resolved + dismissed,
         }
 
     def create_session(

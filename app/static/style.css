@@ -218,6 +218,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .status-up { color: var(--green); background: #153b34; }
 .status-down { color: var(--red); background: #40242e; }
 .status-pending { color: #e8bd67; background: #3c3424; }
+.status-dismissed { color: #b9c2d0; background: #303a4b; }
 
 .action-group { display: flex; gap: 6px; }
 .action-button {
@@ -420,7 +421,7 @@ tbody tr:last-child td { border-bottom: 0; }
 /* Incidents workspace */
 .incident-summary-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
     padding: 18px 22px;
     border-bottom: 1px solid var(--border);

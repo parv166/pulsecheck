@@ -278,9 +278,18 @@ function renderIncidents(records) {
 
     body.innerHTML = records.map(incident => {
         const active = incident.status === "ACTIVE";
-        const status = active ? "ACTIVE" : "RESOLVED";
-        const statusClass = active ? "down" : "up";
-        const detail = incident.error || "No error details recorded";
+        const dismissed = incident.status === "DISMISSED";
+        const status = dismissed ? "DISMISSED" : active ? "ACTIVE" : "RESOLVED";
+        const statusClass = dismissed ? "dismissed" : active ? "down" : "up";
+        const endedAt = incident.resolved_at || incident.dismissed_at;
+        const closure = incident.resolved_at
+            ? formatDate(incident.resolved_at)
+            : incident.dismissed_at
+                ? `Dismissed ${formatDate(incident.dismissed_at)}`
+                : "—";
+        const detail = dismissed
+            ? [incident.dismissal_reason, incident.error].filter(Boolean).join(" — ")
+            : incident.error || "No error details recorded";
 
         return `
             <tr>
@@ -292,8 +301,8 @@ function renderIncidents(records) {
                     <span class="status-pill status-${statusClass}">● ${status}</span>
                 </td>
                 <td>${escapeHTML(formatDate(incident.started_at))}</td>
-                <td>${escapeHTML(incident.resolved_at ? formatDate(incident.resolved_at) : "—")}</td>
-                <td>${escapeHTML(formatDuration(incident.started_at, incident.resolved_at))}</td>
+                <td>${escapeHTML(closure)}</td>
+                <td>${escapeHTML(formatDuration(incident.started_at, endedAt))}</td>
                 <td>${escapeHTML(incident.status_code ?? "—")}</td>
                 <td>${escapeHTML(incident.consecutive_failures ?? "—")}</td>
                 <td>
@@ -317,6 +326,7 @@ async function loadIncidents() {
 
         $("incident-stat-active").textContent = summary.active ?? 0;
         $("incident-stat-resolved").textContent = summary.resolved ?? 0;
+        $("incident-stat-dismissed").textContent = summary.dismissed ?? 0;
         $("incident-stat-total").textContent = summary.total ?? 0;
 
         renderIncidents(data.incidents || []);

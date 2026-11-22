@@ -151,12 +151,43 @@ def test_delete_target(client):
         },
     ).json()
 
+    target = client.app.state.database.get_target(created["id"])
+    now = datetime.now(timezone.utc)
+
+    client.app.state.database.save_result(
+        CheckResult(
+            target_id=target.id,
+            name=target.name,
+            url=target.url,
+            status="DOWN",
+            status_code=503,
+            latency_ms=35.0,
+            checked_at=now,
+            consecutive_failures=1,
+            last_success_at=None,
+            error="Unexpected HTTP status: 503",
+        )
+    )
+
     response = client.delete(
         f"/api/targets/{created['id']}"
     )
 
     assert response.status_code == 200
     assert response.json()["deleted"] is True
+
+    dismissed = client.get("/api/incidents?status=dismissed")
+    assert dismissed.status_code == 200
+    assert len(dismissed.json()["incidents"]) == 1
+    assert dismissed.json()["incidents"][0]["status"] == "DISMISSED"
+
+    active = client.get("/api/incidents?status=active")
+    assert active.status_code == 200
+    assert active.json()["incidents"] == []
+
+    summary = client.get("/api/incidents/summary").json()
+    assert summary["active"] == 0
+    assert summary["dismissed"] == 1
 
 
 def test_manual_check(client, monkeypatch):

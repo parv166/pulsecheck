@@ -207,6 +207,7 @@
                         <button class="action-button active" data-incident-filter="all">All</button>
                         <button class="action-button" data-incident-filter="active">Active</button>
                         <button class="action-button" data-incident-filter="resolved">Resolved</button>
+                        <button class="action-button" data-incident-filter="dismissed">Dismissed</button>
                     </div>
                 </div>
 
@@ -220,6 +221,11 @@
                         <div class="stat-label">Resolved incidents</div>
                         <div class="stat-value green" id="incident-stat-resolved">—</div>
                         <div class="stat-note">Recovered applications</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Dismissed incidents</div>
+                        <div class="stat-value" id="incident-stat-dismissed">—</div>
+                        <div class="stat-note">Monitor deleted before recovery</div>
                     </article>
                     <article class="stat-card">
                         <div class="stat-label">Total incidents</div>
@@ -243,7 +249,7 @@
                                 <th>MONITOR</th>
                                 <th>STATUS</th>
                                 <th>STARTED</th>
-                                <th>RESOLVED</th>
+                                <th>RESOLVED / DISMISSED</th>
                                 <th>DURATION</th>
                                 <th>HTTP</th>
                                 <th>FAILURES</th>

@@ -109,6 +109,7 @@ def test_incident_down_recovery_and_recurrence(tmp_path):
     assert database.get_incident_summary() == {
         "active": 1,
         "resolved": 1,
+        "dismissed": 0,
         "total": 2,
     }
 
@@ -148,6 +149,7 @@ def test_incident_api_filters_and_summary(client):
     assert summary.json() == {
         "active": 0,
         "resolved": 1,
+        "dismissed": 0,
         "total": 1,
     }
 
@@ -235,5 +237,6 @@ def test_manual_check_persists_down_and_recovery(client, monkeypatch):
     assert client.get("/api/incidents/summary").json() == {
         "active": 0,
         "resolved": 1,
+        "dismissed": 0,
         "total": 1,
     }
