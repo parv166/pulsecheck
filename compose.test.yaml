@@ -1,0 +1,73 @@
+services:
+  pulsecheck:
+    image: "${PULSECHECK_IMAGE:-pulsecheck:1.0.0}"
+    volumes:
+      - ./test-support/integration_test.py:/app/integration_test.py:ro
+    environment:
+      PULSECHECK_TEST_MODE: "true"
+      PULSECHECK_TEST_ALLOWED_HOST: "health-simulator"
+      PULSECHECK_TEST_ALLOWED_IP: "${PULSECHECK_TEST_SIMULATOR_IP:-172.30.50.10}"
+      PULSECHECK_CHECK_INTERVAL_SECONDS: "5"
+      PULSECHECK_WEBHOOK_URL: ${PULSECHECK_WEBHOOK_URL:-}
+      PULSECHECK_ADMIN_USERNAME: "${PULSECHECK_ADMIN_USERNAME:?CI admin username is required}"
+      PULSECHECK_ADMIN_PASSWORD_HASH: "${PULSECHECK_ADMIN_PASSWORD_HASH:?CI admin password hash is required}"
+      PULSECHECK_COOKIE_SECURE: "false"
+
+    depends_on:
+      health-simulator:
+        condition: service_healthy
+
+    networks:
+      default: {}
+      pulsecheck-test:
+        ipv4_address: "${PULSECHECK_TEST_APP_IP:-172.30.50.2}"
+
+  prometheus:
+    volumes:
+      - ./prometheus/prometheus.ci.yml:/etc/prometheus/prometheus.yml:ro
+
+  health-simulator:
+    image: python:3.14-slim
+    command: ["python", "-u", "/app/server.py"]
+
+    volumes:
+      - ./test-support/health-simulator/server.py:/app/server.py:ro
+
+    networks:
+      pulsecheck-test:
+        ipv4_address: "${PULSECHECK_TEST_SIMULATOR_IP:-172.30.50.10}"
+
+    user: "65534:65534"
+    read_only: true
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=1m
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/container-health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+    restart: unless-stopped
+
+networks:
+  default: {}
+
+  pulsecheck-test:
+    driver: bridge
+    internal: true
+
+    ipam:
+      config:
+        - subnet: "${PULSECHECK_TEST_SUBNET:-172.30.50.0/24}"

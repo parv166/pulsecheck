@@ -1,0 +1,96 @@
+groups:
+  - name: pulsecheck-availability
+    rules:
+      - alert: PulseCheckDown
+        expr: up{job="pulsecheck"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PulseCheck application is down"
+          description: "Prometheus cannot scrape the PulseCheck API."
+
+      - alert: NodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node Exporter is down"
+          description: "Ubuntu host metrics are unavailable."
+
+      - alert: CadvisorDown
+        expr: up{job="cadvisor"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "cAdvisor is down"
+          description: "Docker container metrics are unavailable."
+
+  - name: pulsecheck-infrastructure
+    rules:
+      - alert: HighHostCPU
+        expr: |
+          100 * (
+            1 - avg by (instance) (
+              rate(node_cpu_seconds_total{job="node-exporter",mode="idle"}[5m])
+            )
+          ) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ubuntu CPU usage is high"
+          description: "Host CPU utilization has exceeded 85% for 5 minutes."
+
+      - alert: HighHostMemory
+        expr: |
+          100 * (
+            1 - (
+              node_memory_MemAvailable_bytes{job="node-exporter"}
+              /
+              node_memory_MemTotal_bytes{job="node-exporter"}
+            )
+          ) > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ubuntu memory usage is high"
+          description: "Host memory utilization has exceeded 90% for 5 minutes."
+
+      - alert: HighRootDiskUsage
+        expr: |
+          100 * (
+            1 - (
+              node_filesystem_avail_bytes{
+                job="node-exporter",
+                mountpoint="/",
+                fstype="ext4"
+              }
+              /
+              node_filesystem_size_bytes{
+                job="node-exporter",
+                mountpoint="/",
+                fstype="ext4"
+              }
+            )
+          ) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ubuntu root disk usage is high"
+          description: "Root filesystem usage has exceeded 85% for 5 minutes."
+
+  - name: pulsecheck-monitored-applications
+    rules:
+      - alert: MonitoredApplicationDown
+        expr: pulsecheck_monitored_target_up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Monitored application {{ $labels.target_name }} is DOWN'
+          description: 'Target {{ $labels.target_name }} (ID: {{ $labels.target_id }}) has been reporting DOWN for at least 30 seconds.'

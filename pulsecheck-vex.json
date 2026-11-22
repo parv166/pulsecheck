@@ -1,0 +1,69 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "urn:uuid:ff17333f-c11e-4a3e-b1bd-409e490b9819",
+  "author": "PulseCheck Project Security Assessment",
+  "timestamp": "2026-11-22T18:43:16+05:30",
+  "version": 3,
+  "statements": [
+    {
+      "@id": "urn:uuid:06629439-b10f-4df6-b5ab-6f6c406084a1",
+      "vulnerability": {
+        "name": "CVE-2026-107493"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/libssl3t64@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "status_notes": "PulseCheck does not call PEM_X509_INFO_read_bio_ex(), PEM_X509_INFO_read_bio(), PEM_X509_INFO_read(), or PEM_X509_INFO_read_ex() with a caller-supplied existing X509_INFO stack. The production dependency set is requirements.txt; cryptography is a development-only dependency in requirements-dev.txt and is not installed by Dockerfile.dhi. The inspected production application has no custom PEM/X509 stack handling. The vulnerable condition requires reuse of a pre-existing non-NULL stack after a failed read. This assessment is limited to the exact OpenSSL package versions listed. Reassess if custom PEM/X509 parsing or additional cryptographic bindings are introduced."
+    },
+    {
+      "@id": "urn:uuid:94a18322-e9c8-429f-8a50-57d6614e7027",
+      "vulnerability": {
+        "name": "CVE-2026-84786"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/libssl3t64@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "status_notes": "PulseCheck uses Python's standard TLS implementation through Uvicorn and httpx.AsyncClient. The application does not enable DANE, configure TLSA records, or call OpenSSL DANE APIs. The vulnerable condition requires a DANE-enabled TLS client processing particular TLSA and certificate combinations. DANE processing is therefore not in the PulseCheck application execution path. Reassess if DANE or custom OpenSSL TLSA functionality is introduced."
+    },
+    {
+      "@id": "urn:uuid:97bf11ab-1be6-4091-9827-f8d097123eab",
+      "vulnerability": {
+        "name": "CVE-2026-121482"
+      },
+      "products": [
+        {
+          "@id": "pkg:deb/debian/libssl3t64@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        },
+        {
+          "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.9-1~deb13u1%2Bdhi0?arch=amd64&os_distro=trixie&os_name=debian&os_version=13"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "status_notes": "PulseCheck does not parse or verify CMS/PKCS#7 SignedData, does not call CMS_verify() or PKCS7_verify(), and does not enable CRL checking for CMS/PKCS#7 verification. Its HTTP and HTTPS functionality uses the standard TLS certificate-validation path, not CMS SignedData verification. The vulnerable execution path is not used by the PulseCheck application. Reassess if CMS/PKCS#7 verification or CRL-enabled SignedData processing is introduced."
+    }
+  ]
+}

@@ -6,10 +6,141 @@ services:
 
     image: pulsecheck:1.0.0
 
+    env_file:
+      - ./secrets/auth.local.env
+
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${PULSECHECK_HOST_PORT:-8000}:8000"
 
     environment:
       APP_VERSION: "1.0.0"
+      PULSECHECK_DB_PATH: "/app/data/pulsecheck.db"
+      PULSECHECK_CHECK_INTERVAL_SECONDS: "${PULSECHECK_CHECK_INTERVAL_SECONDS:-10}"
+
+    volumes:
+      - pulsecheck_data:/app/data
+
+    read_only: true
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+
+    pids_limit: 100
 
     restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+
+    depends_on:
+      pulsecheck:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.3.0-slim
+
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Grafana password missing from .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+
+    depends_on:
+      - prometheus
+
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.35.0
+
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+
+    ports:
+      - "127.0.0.1:9093:9093"
+
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+      - /etc/pulsecheck-secrets/gmail_app_password:/run/secrets/gmail_app_password:ro
+
+    restart: unless-stopped
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:v1.12.1
+
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro,rslave
+
+    expose:
+      - "9100"
+
+    read_only: true
+
+    security_opt:
+      - no-new-privileges:true
+
+    restart: unless-stopped
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+
+    devices:
+      - /dev/kmsg:/dev/kmsg
+
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+
+    expose:
+      - "8080"
+
+    security_opt:
+      - no-new-privileges:true
+
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+  pulsecheck_data:

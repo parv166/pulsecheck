@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+
+# Build stage: install Python dependencies
+FROM dhi.io/python:3.14-dev@sha256:d678d13f4801887a05c7adb706cec46a9611e40c83668eba49609ea4a51a3772 AS build-stage
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:${PATH}"
+
+WORKDIR /app
+
+RUN python -m venv /app/venv
+
+COPY requirements.txt .
+
+RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip \
+    && mkdir -p /app/data
+
+
+# Runtime stage: minimal hardened Python image
+FROM dhi.io/python@sha256:4a537bd4d0042e56efa5d97e43e34b11b08d5e018e4890ce107a9f290190197a AS runtime-stage
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:${PATH}" \
+    APP_VERSION=1.0.0 \
+    PULSECHECK_DB_PATH=/app/data/pulsecheck.db
+
+WORKDIR /app
+
+COPY --from=build-stage --chown=65532:65532 /app/venv /app/venv
+COPY --chown=65532:65532 app/ ./app/
+COPY --from=build-stage --chown=65532:65532 /app/data ./data
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/app/venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+
+CMD ["/app/venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

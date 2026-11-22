@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#101827">
+    <title>PulseCheck | Application Monitoring</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
+</head>
+<body>
+    <div class="app-layout">
+        <aside class="sidebar">
+            <a class="brand" href="/">
+                <span class="brand-icon">P</span>
+                <span>
+                    <strong>PulseCheck</strong>
+                    <small>APPLICATION MONITORING</small>
+                </span>
+            </a>
+
+            <div class="nav-label">WORKSPACE</div>
+            <nav>
+                <a class="nav-link active" href="#overview">◫ &nbsp; Overview</a>
+                <a class="nav-link" href="#monitors">◉ &nbsp; Monitors</a>
+                <a class="nav-link" href="#servers">▣ &nbsp; Servers</a>
+                <a class="nav-link" href="#incidents">⚠ &nbsp; Incidents</a>
+            </nav>
+
+            <div class="sidebar-bottom">
+                <span class="live-dot"></span>
+                <span>
+                    <strong>Monitoring engine</strong>
+                    <small id="engine-status">Connecting...</small>
+                </span>
+            </div>
+        </aside>
+
+        <main class="main-content" id="overview">
+            <header class="topbar">
+                <div>
+                    <div class="eyebrow">WORKSPACE / OVERVIEW</div>
+                    <h1>Overview</h1>
+                    <p class="subtitle">Keep an eye on the applications that matter.</p>
+                </div>
+
+                <div class="top-actions">
+                    <span id="last-updated">Loading...</span>
+                    <button class="button secondary" id="refresh-button">↻ Refresh</button>
+                    <button class="button primary" id="open-add-dialog">+ Add monitor</button>
+                    <button class="button secondary" id="logout-button">Sign out</button>
+                </div>
+            </header>
+
+            <section class="stats-grid" aria-label="Monitoring summary">
+                <article class="stat-card">
+                    <div class="stat-label">Total monitors</div>
+                    <div class="stat-value" id="stat-total">—</div>
+                    <div class="stat-note">Registered endpoints</div>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-label">Operational</div>
+                    <div class="stat-value green" id="stat-up">—</div>
+                    <div class="stat-note">Currently reporting UP</div>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-label">Down</div>
+                    <div class="stat-value red" id="stat-down">—</div>
+                    <div class="stat-note">Currently reporting DOWN</div>
+                </article>
+
+                <article class="stat-card">
+                    <div class="stat-label">Average response</div>
+                    <div class="stat-value" id="stat-latency">—</div>
+                    <div class="stat-note">Latest recorded checks</div>
+                </article>
+            </section>
+
+            <section class="panel" id="monitors">
+                <div class="panel-header">
+                    <div>
+                        <h2>Monitored applications</h2>
+                        <p>Availability and response health of your endpoints.</p>
+                    </div>
+                    <span class="count-label" id="monitor-count">0 monitors</span>
+                </div>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>APPLICATION</th>
+                                <th>STATUS</th>
+                                <th>HTTP</th>
+                                <th>RESPONSE</th>
+                                <th>LAST CHECK</th>
+                                <th>ACTIONS</th>
+                            </tr>
+                        </thead>
+                        <tbody id="targets-body"></tbody>
+                    </table>
+                </div>
+
+                <div class="empty-state" id="empty-state" hidden>
+                    <div class="empty-icon">◉</div>
+                    <h3>No monitors yet</h3>
+                    <p>Add your first website or API endpoint to start monitoring.</p>
+                    <button class="button primary" id="empty-add-button">+ Add your first monitor</button>
+                </div>
+
+                <div class="error-message" id="error-message" hidden></div>
+            </section>
+
+            <section class="panel servers-panel" id="servers">
+                <div class="panel-header">
+                    <div>
+                        <h2>AWS Servers</h2>
+                        <p>EC2 instance health and CloudWatch performance metrics.</p>
+                    </div>
+                    <span id="servers-health" class="server-health-pill unknown">Loading...</span>
+                </div>
+
+                <div class="server-summary-grid">
+                    <article class="stat-card">
+                        <div class="stat-label">Instance state</div>
+                        <div class="stat-value" id="server-state">—</div>
+                        <div class="stat-note" id="server-instance-id">Instance ID unavailable</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">CPU utilization</div>
+                        <div class="stat-value" id="server-cpu">—</div>
+                        <div class="stat-note" id="server-cpu-time">Latest 5-minute average</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Network in</div>
+                        <div class="stat-value" id="server-network-in">—</div>
+                        <div class="stat-note" id="server-network-in-time">Latest 5-minute total</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Network out</div>
+                        <div class="stat-value" id="server-network-out">—</div>
+                        <div class="stat-note" id="server-network-out-time">Latest 5-minute total</div>
+                    </article>
+                </div>
+
+                <div class="panel-header server-details-heading">
+                    <div>
+                        <h2>Instance details</h2>
+                        <p>Infrastructure information and EC2 status checks.</p>
+                    </div>
+                    <span class="count-label" id="server-age">Waiting for data</span>
+                </div>
+
+                <div class="server-details-grid">
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Instance type</div>
+                        <div class="server-detail-value" id="server-instance-type">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Availability zone</div>
+                        <div class="server-detail-value" id="server-az">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">System status</div>
+                        <div class="server-detail-value" id="server-system-status">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Instance status</div>
+                        <div class="server-detail-value" id="server-instance-status">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">AWS region</div>
+                        <div class="server-detail-value" id="server-region">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Launch time</div>
+                        <div class="server-detail-value" id="server-launch-time">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Last collected</div>
+                        <div class="server-detail-value" id="server-collected">—</div>
+                    </div>
+                    <div class="server-detail-card">
+                        <div class="server-detail-label">Data freshness</div>
+                        <div class="server-detail-value" id="server-freshness">—</div>
+                    </div>
+                </div>
+
+                <div class="server-notice" id="servers-warning" hidden></div>
+                <div class="empty-state" id="servers-unavailable" hidden>
+                    <div class="empty-icon">▣</div>
+                    <h3>Server metrics unavailable</h3>
+                    <p id="servers-unavailable-message">Waiting for the first metrics collection.</p>
+                </div>
+                <div class="error-message" id="servers-error" hidden></div>
+            </section>
+
+            <section class="panel incidents-panel" id="incidents">
+                <div class="panel-header incidents-header">
+                    <div>
+                        <h2>Incidents</h2>
+                        <p>Monitor outages and recovery history.</p>
+                    </div>
+                    <div class="incident-filters" role="group" aria-label="Filter incidents">
+                        <button class="action-button active" data-incident-filter="all">All</button>
+                        <button class="action-button" data-incident-filter="active">Active</button>
+                        <button class="action-button" data-incident-filter="resolved">Resolved</button>
+                        <button class="action-button" data-incident-filter="dismissed">Dismissed</button>
+                    </div>
+                </div>
+
+                <div class="incident-summary-grid">
+                    <article class="stat-card">
+                        <div class="stat-label">Active incidents</div>
+                        <div class="stat-value red" id="incident-stat-active">—</div>
+                        <div class="stat-note">Currently unresolved</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Resolved incidents</div>
+                        <div class="stat-value green" id="incident-stat-resolved">—</div>
+                        <div class="stat-note">Recovered applications</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Dismissed incidents</div>
+                        <div class="stat-value" id="incident-stat-dismissed">—</div>
+                        <div class="stat-note">Monitor deleted before recovery</div>
+                    </article>
+                    <article class="stat-card">
+                        <div class="stat-label">Total incidents</div>
+                        <div class="stat-value" id="incident-stat-total">—</div>
+                        <div class="stat-note">Recorded incident history</div>
+                    </article>
+                </div>
+
+                <div class="panel-header">
+                    <div>
+                        <h2>Incident history</h2>
+                        <p>Most recent incidents first.</p>
+                    </div>
+                    <span class="count-label" id="incidents-count">Loading...</span>
+                </div>
+
+                <div class="table-wrap">
+                    <table class="incidents-table">
+                        <thead>
+                            <tr>
+                                <th>MONITOR</th>
+                                <th>STATUS</th>
+                                <th>STARTED</th>
+                                <th>RESOLVED / DISMISSED</th>
+                                <th>DURATION</th>
+                                <th>HTTP</th>
+                                <th>FAILURES</th>
+                                <th>DETAIL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="incidents-body"></tbody>
+                    </table>
+                </div>
+
+                <div class="empty-state" id="incidents-empty" hidden>
+                    <div class="empty-icon">✓</div>
+                    <h3>No incidents found</h3>
+                    <p>There are no incidents matching this filter.</p>
+                </div>
+
+                <div class="error-message" id="incidents-error" hidden></div>
+            </section>
+
+            <section class="panel history-panel" id="history-panel" hidden>
+                <div class="panel-header">
+                    <div>
+                        <h2 id="history-title">Monitoring history</h2>
+                        <p>Recent health-check results for this application.</p>
+                    </div>
+                    <button class="button secondary" id="close-history">Close</button>
+                </div>
+                <div id="history-chart" class="history-chart"></div>
+                <div id="history-content"></div>
+            </section>
+
+            <footer class="footer">
+                <span>PulseCheck <span id="app-version"></span></span>
+                <span>Application monitoring</span>
+            </footer>
+        </main>
+    </div>
+
+    <dialog id="add-dialog" class="dialog">
+        <form id="add-form">
+            <div class="dialog-header">
+                <div>
+                    <div class="eyebrow">NEW MONITOR</div>
+                    <h2>Add application</h2>
+                </div>
+                <button type="button" class="close-button" id="close-dialog" aria-label="Close">×</button>
+            </div>
+
+            <label for="target-name">Application name</label>
+            <input id="target-name" name="name" type="text"
+                   maxlength="100" placeholder="My website" required>
+
+            <label for="target-url">Website or API URL</label>
+            <input id="target-url" name="url" type="url"
+                   maxlength="2048" placeholder="https://example.com" required>
+
+            <p class="form-hint">Use a publicly reachable HTTP or HTTPS endpoint.</p>
+
+            <div class="dialog-actions">
+                <button type="button" class="button secondary" id="cancel-dialog">Cancel</button>
+                <button type="submit" class="button primary" id="submit-target">Add monitor</button>
+            </div>
+        </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

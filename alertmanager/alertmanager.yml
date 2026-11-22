@@ -1,0 +1,23 @@
+global:
+  smtp_smarthost: "smtp.gmail.com:587"
+  smtp_from: "parvchandegaraon@gmail.com"
+  smtp_auth_username: "parvchandegaraon@gmail.com"
+  smtp_auth_password_file: "/run/secrets/gmail_app_password"
+  smtp_require_tls: true
+
+route:
+  receiver: "email-alerts"
+  group_by:
+    - alertname
+    - job
+    - severity
+    - target_id
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+
+receivers:
+  - name: "email-alerts"
+    email_configs:
+      - to: "parvchandegaraon@gmail.com"
+        send_resolved: true

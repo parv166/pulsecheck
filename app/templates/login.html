@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#101827">
+    <title>Sign in | PulseCheck</title>
+    <link rel="stylesheet" href="/static/login.css">
+    <script src="/static/login.js" defer></script>
+</head>
+<body>
+    <main class="login-shell">
+        <section class="login-card">
+            <div class="brand-icon">P</div>
+            <p class="eyebrow">APPLICATION MONITORING PLATFORM</p>
+            <h1>Welcome back</h1>
+            <p class="subtitle">Sign in to manage your applications and infrastructure.</p>
+
+            <form id="login-form">
+                <label for="username">Username</label>
+                <input
+                    id="username"
+                    name="username"
+                    type="text"
+                    autocomplete="username"
+                    maxlength="64"
+                    required
+                >
+
+                <label for="password">Password</label>
+                <input
+                    id="password"
+                    name="password"
+                    type="password"
+                    autocomplete="current-password"
+                    required
+                >
+
+                <p id="login-error" class="error" role="alert" hidden></p>
+
+                <button id="login-button" type="submit">
+                    Sign in
+                </button>
+            </form>
+
+            <p class="footer">PulseCheck · Secure administrator access</p>
+        </section>
+    </main>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PulseCheck EC2 metrics collection every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=pulsecheck-metrics.service
+
+[Install]
+WantedBy=timers.target
