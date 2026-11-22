@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage: install Python dependencies
-FROM dhi.io/python:3.14-dev@sha256:60dbebd00c5332a2d5984a96f33b76d6e42167095a9db8c49cd0038ac388de77 AS build-stage
+FROM dhi.io/python:3.14-dev@sha256:d678d13f4801887a05c7adb706cec46a9611e40c83668eba49609ea4a51a3772 AS build-stage
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -20,7 +20,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
 
 
 # Runtime stage: minimal hardened Python image
-FROM dhi.io/python:3.14@sha256:d20d953b545c83acd9e1b6b6b6d27cf14de38e6a39689334f71454c33cf41893 AS runtime-stage
+FROM dhi.io/python:3.14@sha256:de56731ea3ff80eef32ded2c4a32968f0c02f9f6358a93d2224f07dff42e7ae2 AS runtime-stage
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
