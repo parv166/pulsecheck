@@ -206,6 +206,120 @@ def test_check_target_pins_validated_ip_and_preserves_https_hostname(
     asyncio.run(scenario())
 
 
+def test_public_destination_prefers_ipv4_before_ipv6(monkeypatch):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        async def fake_getaddrinfo(hostname, port, *, type):
+            return [
+                (
+                    socket.AF_INET6,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("2606:4700:4700::1111", port, 0, 0),
+                ),
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("8.8.8.8", port),
+                ),
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("1.1.1.1", port),
+                ),
+            ]
+
+        monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+        addresses = await ensure_public_destination(
+            "https://example.com/health"
+        )
+
+        assert addresses == [
+            "1.1.1.1",
+            "8.8.8.8",
+            "2606:4700:4700::1111",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_check_target_falls_back_after_connection_error(monkeypatch):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        dns_calls = 0
+        attempted_hosts = []
+
+        async def fake_getaddrinfo(hostname, port, *, type):
+            nonlocal dns_calls
+            dns_calls += 1
+
+            # IPv6 comes first from DNS, but IPv4 should be preferred.
+            return [
+                (
+                    socket.AF_INET6,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("2606:4700:4700::1111", port, 0, 0),
+                ),
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("8.8.8.8", port),
+                ),
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    ("1.1.1.1", port),
+                ),
+            ]
+
+        monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+        def handler(request):
+            attempted_hosts.append(request.url.host)
+
+            if request.url.host == "1.1.1.1":
+                raise httpx.ConnectError(
+                    "Simulated connection failure",
+                    request=request,
+                )
+
+            return httpx.Response(status_code=503)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            service = MonitoringService(client=client)
+
+            target = service.register_target(
+                "DNS fallback test",
+                "https://example.com/health",
+            )
+
+            result = await service.check_target(target.id)
+
+            assert dns_calls == 1
+            assert attempted_hosts == ["1.1.1.1", "8.8.8.8"]
+            assert result.status == "DOWN"
+            assert result.status_code == 503
+            assert result.error == "Unexpected HTTP status: 503"
+            await service.close()
+
+    asyncio.run(scenario())
+
+
 def test_test_allowlist_rejects_public_ip():
     with pytest.raises(ValueError, match="private"):
         MonitoringService(
